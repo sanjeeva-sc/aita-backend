@@ -13,8 +13,21 @@ const GeminiService = require("./services/ollamaService");
 const app = express();
 const PORT = process.env.PORT || 8080;
 
-// Initialize Gemini service
-const geminiService = new GeminiService();
+// Initialize Gemini service conditionally
+let geminiService = null;
+
+function getGeminiService() {
+  if (!geminiService && process.env.GEMINI_API_KEY) {
+    try {
+      geminiService = new GeminiService();
+      console.log('Gemini service initialized successfully');
+    } catch (error) {
+      console.error('Failed to initialize Gemini service:', error.message);
+      return null;
+    }
+  }
+  return geminiService;
+}
 
 // Middleware
 app.use(cors({ origin: process.env.CORS_ORIGIN || "*" }));
@@ -478,7 +491,12 @@ async function generateNotes(
     }
 
     // Generate notes using Gemini service
-    const result = await geminiService.generateNotes(transcript, geminiOptions);
+    const service = getGeminiService();
+    if (!service) {
+      throw new Error("Gemini service is not available. Please check GEMINI_API_KEY configuration.");
+    }
+    
+    const result = await service.generateNotes(transcript, geminiOptions);
 
     if (result.success) {
       return result.content;
@@ -544,7 +562,12 @@ async function generateQuiz(transcript, customOptions = null) {
     }
 
     // Generate quiz using Gemini service
-    const result = await geminiService.generateQuiz(transcript, geminiOptions);
+    const service = getGeminiService();
+    if (!service) {
+      throw new Error("Gemini service is not available. Please check GEMINI_API_KEY configuration.");
+    }
+    
+    const result = await service.generateQuiz(transcript, geminiOptions);
     console.log("🔍 Gemini service result:", JSON.stringify(result, null, 2));
 
     if (result.success) {
@@ -599,7 +622,12 @@ Return ONLY a valid JSON object with keys:
 
 Transcript:\n${transcript}`;
 
-    const result = await geminiService.generateContent(prompt);
+    const service = getGeminiService();
+    if (!service) {
+      throw new Error("Gemini service is not available. Please check GEMINI_API_KEY configuration.");
+    }
+    
+    const result = await service.generateContent(prompt);
     if (!result.success) {
       throw new Error(result.error || "Failed to generate metadata");
     }
@@ -701,7 +729,17 @@ app.post(
         : null;
 
       // Check Gemini service connection before processing
-      const connectionCheck = await geminiService.checkConnection();
+      const service = getGeminiService();
+      if (!service) {
+        console.error("Gemini service not configured");
+        return res.status(503).json({
+          error:
+            "AI service is not configured. Please check GEMINI_API_KEY environment variable.",
+          details: "GEMINI_API_KEY environment variable is required",
+        });
+      }
+      
+      const connectionCheck = await service.checkConnection();
       if (!connectionCheck.connected) {
         console.error("Gemini service unavailable:", connectionCheck.error);
         return res.status(503).json({
@@ -2029,7 +2067,14 @@ Please provide a rewritten version that follows the instruction while maintainin
 }
 `;
 
-      const aiResponse = await geminiService.generateContent(rewritePrompt);
+      const service = getGeminiService();
+      if (!service) {
+        return res.status(503).json({
+          error: "Gemini service is not available. Please check GEMINI_API_KEY configuration."
+        });
+      }
+      
+      const aiResponse = await service.generateContent(rewritePrompt);
 
       // Parse AI response
       let rewrittenQuestion;
@@ -2206,7 +2251,18 @@ app.get("/health", (req, res) => {
 // Ollama service health check
 app.get("/health/gemini", async (req, res) => {
   try {
-    const connectionCheck = await geminiService.checkConnection();
+    const service = getGeminiService();
+    if (!service) {
+      return res.status(503).json({
+        status: "UNAVAILABLE",
+        service: "Gemini",
+        error: "Gemini service is not configured. Please check GEMINI_API_KEY environment variable.",
+        model: process.env.GEMINI_MODEL || "gemini-2.0-flash",
+        timestamp: new Date().toISOString(),
+      });
+    }
+    
+    const connectionCheck = await service.checkConnection();
     if (connectionCheck.connected) {
       res.json({
         status: "OK",
