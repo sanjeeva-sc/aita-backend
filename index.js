@@ -144,14 +144,11 @@ function initializeDatabase() {
     );
 
     // Add new quiz columns for enhanced quiz functionality
-    db.run(
-      `ALTER TABLE quiz ADD COLUMN title TEXT DEFAULT NULL`,
-      (err) => {
-        if (err && !err.message.includes("duplicate column")) {
-          console.error("Error adding title column:", err);
-        }
+    db.run(`ALTER TABLE quiz ADD COLUMN title TEXT DEFAULT NULL`, (err) => {
+      if (err && !err.message.includes("duplicate column")) {
+        console.error("Error adding title column:", err);
       }
-    );
+    });
 
     db.run(
       `ALTER TABLE quiz ADD COLUMN description TEXT DEFAULT NULL`,
@@ -551,8 +548,11 @@ async function generateQuiz(transcript, customOptions = null) {
     console.log("🔍 Gemini service result:", JSON.stringify(result, null, 2));
 
     if (result.success) {
-      console.log("🔍 Original questions from Gemini:", JSON.stringify(result.content.questions, null, 2));
-      
+      console.log(
+        "🔍 Original questions from Gemini:",
+        JSON.stringify(result.content.questions, null, 2)
+      );
+
       // Extract questions array from the quiz result and transform correct index to letter
       const questionsArray = result.content.questions.map((question) => {
         const { correct, ...questionWithoutCorrect } = question;
@@ -560,14 +560,19 @@ async function generateQuiz(transcript, customOptions = null) {
           ...questionWithoutCorrect,
           correct_answer: ["A", "B", "C", "D"][correct],
         };
-        console.log(`🔍 Transforming question: correct=${correct} -> correct_answer=${transformedQuestion.correct_answer}`);
+        console.log(
+          `🔍 Transforming question: correct=${correct} -> correct_answer=${transformedQuestion.correct_answer}`
+        );
         return transformedQuestion;
       });
-      
-      console.log("🔍 Transformed questions array:", JSON.stringify(questionsArray, null, 2));
+
+      console.log(
+        "🔍 Transformed questions array:",
+        JSON.stringify(questionsArray, null, 2)
+      );
       const stringifiedResult = JSON.stringify(questionsArray);
       console.log("🔍 Final stringified result:", stringifiedResult);
-      
+
       return stringifiedResult;
     } else {
       throw new Error(result.error || "Failed to generate quiz with Gemini");
@@ -1096,11 +1101,9 @@ app.get("/api/quiz/shared/:token", (req, res) => {
         // Ensure questions is an array before mapping
         if (!Array.isArray(questions)) {
           console.error("Questions is not an array:", questions);
-          return res
-            .status(500)
-            .json({
-              error: "Invalid quiz data format - questions must be an array",
-            });
+          return res.status(500).json({
+            error: "Invalid quiz data format - questions must be an array",
+          });
         }
 
         // Remove correct answers from questions for student view
@@ -1893,7 +1896,14 @@ app.get("/analytics/export", ClerkExpressRequireAuth(), async (req, res) => {
 app.put("/api/quiz/:id", ClerkExpressRequireAuth(), (req, res) => {
   const quizId = req.params.id;
   const userId = req.auth.userId;
-  const { questions, title, description, timeLimit, showAnswers, shuffleQuestions } = req.body;
+  const {
+    questions,
+    title,
+    description,
+    timeLimit,
+    showAnswers,
+    shuffleQuestions,
+  } = req.body;
 
   if (!questions || !Array.isArray(questions)) {
     return res.status(400).json({ error: "Questions array is required" });
@@ -1901,10 +1911,16 @@ app.put("/api/quiz/:id", ClerkExpressRequireAuth(), (req, res) => {
 
   // Validate question format
   for (const question of questions) {
-    if (!question.question || !question.options || !Array.isArray(question.options) || 
-        question.options.length < 2 || !question.correct_answer) {
-      return res.status(400).json({ 
-        error: "Each question must have question text, at least 2 options, and a correct answer" 
+    if (
+      !question.question ||
+      !question.options ||
+      !Array.isArray(question.options) ||
+      question.options.length < 2 ||
+      !question.correct_answer
+    ) {
+      return res.status(400).json({
+        error:
+          "Each question must have question text, at least 2 options, and a correct answer",
       });
     }
   }
@@ -1925,7 +1941,7 @@ app.put("/api/quiz/:id", ClerkExpressRequireAuth(), (req, res) => {
       showAnswers ? 1 : 0,
       shuffleQuestions ? 1 : 0,
       quizId,
-      userId
+      userId,
     ],
     function (err) {
       if (err) {
@@ -1934,68 +1950,75 @@ app.put("/api/quiz/:id", ClerkExpressRequireAuth(), (req, res) => {
       }
 
       if (this.changes === 0) {
-        return res.status(404).json({ error: "Quiz not found or unauthorized" });
+        return res
+          .status(404)
+          .json({ error: "Quiz not found or unauthorized" });
       }
 
-      res.json({ 
+      res.json({
         message: "Quiz updated successfully",
         quizId: quizId,
-        questionsUpdated: questions.length
+        questionsUpdated: questions.length,
       });
     }
   );
 });
 
 // AI rewrite single question endpoint
-app.post("/api/quiz/:id/question/:questionIndex/rewrite", ClerkExpressRequireAuth(), async (req, res) => {
-  const quizId = req.params.id;
-  const questionIndex = parseInt(req.params.questionIndex);
-  const userId = req.auth.userId;
-  const { prompt } = req.body;
+app.post(
+  "/api/quiz/:id/question/:questionIndex/rewrite",
+  ClerkExpressRequireAuth(),
+  async (req, res) => {
+    const quizId = req.params.id;
+    const questionIndex = parseInt(req.params.questionIndex);
+    const userId = req.auth.userId;
+    const { prompt } = req.body;
 
-  if (!prompt || prompt.length > 300) {
-    return res.status(400).json({ error: "Prompt is required and must be under 300 characters" });
-  }
-
-  try {
-    // First, get the current quiz
-    const quiz = await new Promise((resolve, reject) => {
-      db.get(
-        "SELECT questions FROM quiz WHERE id = ? AND user_id = ?",
-        [quizId, userId],
-        (err, row) => {
-          if (err) reject(err);
-          else resolve(row);
-        }
-      );
-    });
-
-    if (!quiz) {
-      return res.status(404).json({ error: "Quiz not found" });
+    if (!prompt || prompt.length > 300) {
+      return res
+        .status(400)
+        .json({ error: "Prompt is required and must be under 300 characters" });
     }
 
-    let questions;
     try {
-      questions = JSON.parse(quiz.questions);
-    } catch (parseErr) {
-      return res.status(500).json({ error: "Invalid quiz data format" });
-    }
+      // First, get the current quiz
+      const quiz = await new Promise((resolve, reject) => {
+        db.get(
+          "SELECT questions FROM quiz WHERE id = ? AND user_id = ?",
+          [quizId, userId],
+          (err, row) => {
+            if (err) reject(err);
+            else resolve(row);
+          }
+        );
+      });
 
-    if (questionIndex < 0 || questionIndex >= questions.length) {
-      return res.status(400).json({ error: "Invalid question index" });
-    }
+      if (!quiz) {
+        return res.status(404).json({ error: "Quiz not found" });
+      }
 
-    const currentQuestion = questions[questionIndex];
-    
-    // Generate rewritten question using AI
-    const rewritePrompt = `
+      let questions;
+      try {
+        questions = JSON.parse(quiz.questions);
+      } catch (parseErr) {
+        return res.status(500).json({ error: "Invalid quiz data format" });
+      }
+
+      if (questionIndex < 0 || questionIndex >= questions.length) {
+        return res.status(400).json({ error: "Invalid question index" });
+      }
+
+      const currentQuestion = questions[questionIndex];
+
+      // Generate rewritten question using AI
+      const rewritePrompt = `
 Rewrite this quiz question based on the following instruction: "${prompt}"
 
 Current question:
 Question: ${currentQuestion.question}
-Options: ${currentQuestion.options.join(', ')}
+Options: ${currentQuestion.options.join(", ")}
 Correct Answer: ${currentQuestion.correct_answer}
-Explanation: ${currentQuestion.explanation || 'No explanation provided'}
+Explanation: ${currentQuestion.explanation || "No explanation provided"}
 
 Please provide a rewritten version that follows the instruction while maintaining the same educational objective. Return the response in this exact JSON format:
 {
@@ -2006,150 +2029,175 @@ Please provide a rewritten version that follows the instruction while maintainin
 }
 `;
 
-    const aiResponse = await geminiService.generateContent(rewritePrompt);
-    
-    // Parse AI response
-    let rewrittenQuestion;
-    try {
-      let contentToProcess;
-      
-      // Handle structured response from Gemini service
-      if (typeof aiResponse === 'object' && aiResponse.content) {
-        contentToProcess = aiResponse.content;
-      } else {
-        contentToProcess = typeof aiResponse === 'string' ? aiResponse : JSON.stringify(aiResponse);
-      }
-      
-      // Extract JSON from content (handle markdown code blocks)
-      const jsonMatch = contentToProcess.match(/```json\s*(\{[\s\S]*?\})\s*```/) || 
-                       contentToProcess.match(/\{[\s\S]*\}/);
-      
-      if (!jsonMatch) {
-        throw new Error("No JSON found in AI response");
-      }
-      
-      const jsonContent = jsonMatch[1] || jsonMatch[0];
-      rewrittenQuestion = JSON.parse(jsonContent);
-    } catch (parseErr) {
-      console.error("Error parsing AI response:", parseErr);
-      return res.status(500).json({ error: "Failed to parse AI response" });
-    }
+      const aiResponse = await geminiService.generateContent(rewritePrompt);
 
-    // Validate rewritten question
-    if (!rewrittenQuestion.question || !rewrittenQuestion.options || 
-        !Array.isArray(rewrittenQuestion.options) || rewrittenQuestion.options.length < 2 ||
-        !rewrittenQuestion.correct_answer) {
-      return res.status(500).json({ error: "AI generated invalid question format" });
-    }
+      // Parse AI response
+      let rewrittenQuestion;
+      try {
+        let contentToProcess;
 
-    // Update the question in the array
-    questions[questionIndex] = {
-      ...rewrittenQuestion,
-      id: currentQuestion.id || `q_${Date.now()}_${questionIndex}`
-    };
-
-    // Save updated questions back to database
-    await new Promise((resolve, reject) => {
-      db.run(
-        "UPDATE quiz SET questions = ? WHERE id = ? AND user_id = ?",
-        [JSON.stringify(questions), quizId, userId],
-        function (err) {
-          if (err) reject(err);
-          else resolve();
+        // Handle structured response from Gemini service
+        if (typeof aiResponse === "object" && aiResponse.content) {
+          contentToProcess = aiResponse.content;
+        } else {
+          contentToProcess =
+            typeof aiResponse === "string"
+              ? aiResponse
+              : JSON.stringify(aiResponse);
         }
-      );
-    });
 
-    res.json({
-      message: "Question rewritten successfully",
-      question: questions[questionIndex]
-    });
+        // Extract JSON from content (handle markdown code blocks)
+        const jsonMatch =
+          contentToProcess.match(/```json\s*(\{[\s\S]*?\})\s*```/) ||
+          contentToProcess.match(/\{[\s\S]*\}/);
 
-  } catch (error) {
-    console.error("Error rewriting question:", error);
-    res.status(500).json({ error: "Failed to rewrite question" });
+        if (!jsonMatch) {
+          throw new Error("No JSON found in AI response");
+        }
+
+        const jsonContent = jsonMatch[1] || jsonMatch[0];
+        rewrittenQuestion = JSON.parse(jsonContent);
+      } catch (parseErr) {
+        console.error("Error parsing AI response:", parseErr);
+        return res.status(500).json({ error: "Failed to parse AI response" });
+      }
+
+      // Validate rewritten question
+      if (
+        !rewrittenQuestion.question ||
+        !rewrittenQuestion.options ||
+        !Array.isArray(rewrittenQuestion.options) ||
+        rewrittenQuestion.options.length < 2 ||
+        !rewrittenQuestion.correct_answer
+      ) {
+        return res
+          .status(500)
+          .json({ error: "AI generated invalid question format" });
+      }
+
+      // Update the question in the array
+      questions[questionIndex] = {
+        ...rewrittenQuestion,
+        id: currentQuestion.id || `q_${Date.now()}_${questionIndex}`,
+      };
+
+      // Save updated questions back to database
+      await new Promise((resolve, reject) => {
+        db.run(
+          "UPDATE quiz SET questions = ? WHERE id = ? AND user_id = ?",
+          [JSON.stringify(questions), quizId, userId],
+          function (err) {
+            if (err) reject(err);
+            else resolve();
+          }
+        );
+      });
+
+      res.json({
+        message: "Question rewritten successfully",
+        question: questions[questionIndex],
+      });
+    } catch (error) {
+      console.error("Error rewriting question:", error);
+      res.status(500).json({ error: "Failed to rewrite question" });
+    }
   }
-});
+);
 
 // AI regenerate entire quiz endpoint
-app.post("/api/quiz/:id/regenerate", ClerkExpressRequireAuth(), async (req, res) => {
-  const quizId = req.params.id;
-  const userId = req.auth.userId;
-  const { prompt } = req.body;
+app.post(
+  "/api/quiz/:id/regenerate",
+  ClerkExpressRequireAuth(),
+  async (req, res) => {
+    const quizId = req.params.id;
+    const userId = req.auth.userId;
+    const { prompt } = req.body;
 
-  if (!prompt || prompt.length > 300) {
-    return res.status(400).json({ error: "Prompt is required and must be under 300 characters" });
-  }
+    if (!prompt || prompt.length > 300) {
+      return res
+        .status(400)
+        .json({ error: "Prompt is required and must be under 300 characters" });
+    }
 
-  try {
-    // Get the original transcript for this quiz
-    const transcriptData = await new Promise((resolve, reject) => {
-      db.get(
-        `SELECT t.content, q.title, q.description, q.quiz_options 
+    try {
+      // Get the original transcript for this quiz
+      const transcriptData = await new Promise((resolve, reject) => {
+        db.get(
+          `SELECT t.content, q.title, q.description, q.quiz_options 
          FROM quiz q 
          JOIN transcripts t ON q.transcript_id = t.id 
          WHERE q.id = ? AND q.user_id = ?`,
-        [quizId, userId],
-        (err, row) => {
-          if (err) reject(err);
-          else resolve(row);
-        }
-      );
-    });
+          [quizId, userId],
+          (err, row) => {
+            if (err) reject(err);
+            else resolve(row);
+          }
+        );
+      });
 
-    if (!transcriptData) {
-      return res.status(404).json({ error: "Quiz or transcript not found" });
-    }
-
-    // Parse existing quiz options
-    let quizOptions = {};
-    try {
-      if (transcriptData.quiz_options) {
-        quizOptions = JSON.parse(transcriptData.quiz_options);
+      if (!transcriptData) {
+        return res.status(404).json({ error: "Quiz or transcript not found" });
       }
-    } catch (parseErr) {
-      console.log("Using default quiz options");
-    }
 
-    // Create custom options with the user's prompt
-    const customOptions = {
-      ...quizOptions,
-      customInstructions: prompt,
-      numberOfQuestions: quizOptions.numberOfQuestions || 5,
-      questionTypes: quizOptions.questionTypes || ["multiple-choice"],
-      difficultyLevel: quizOptions.difficultyLevel || "medium"
-    };
-
-    // Generate new quiz using existing generateQuiz function
-    const newQuestions = await generateQuiz(transcriptData.content, customOptions);
-
-    if (!newQuestions || newQuestions.length === 0) {
-      return res.status(500).json({ error: "Failed to generate new quiz questions" });
-    }
-
-    // Update the quiz in the database
-    await new Promise((resolve, reject) => {
-      db.run(
-        "UPDATE quiz SET questions = ?, quiz_options = ? WHERE id = ? AND user_id = ?",
-        [JSON.stringify(newQuestions), JSON.stringify(customOptions), quizId, userId],
-        function (err) {
-          if (err) reject(err);
-          else resolve();
+      // Parse existing quiz options
+      let quizOptions = {};
+      try {
+        if (transcriptData.quiz_options) {
+          quizOptions = JSON.parse(transcriptData.quiz_options);
         }
+      } catch (parseErr) {
+        console.log("Using default quiz options");
+      }
+
+      // Create custom options with the user's prompt
+      const customOptions = {
+        ...quizOptions,
+        customInstructions: prompt,
+        numberOfQuestions: quizOptions.numberOfQuestions || 5,
+        questionTypes: quizOptions.questionTypes || ["multiple-choice"],
+        difficultyLevel: quizOptions.difficultyLevel || "medium",
+      };
+
+      // Generate new quiz using existing generateQuiz function
+      const newQuestions = await generateQuiz(
+        transcriptData.content,
+        customOptions
       );
-    });
 
-    res.json({
-      message: "Quiz regenerated successfully",
-      questions: newQuestions,
-      questionsCount: newQuestions.length
-    });
+      if (!newQuestions || newQuestions.length === 0) {
+        return res
+          .status(500)
+          .json({ error: "Failed to generate new quiz questions" });
+      }
 
-  } catch (error) {
-    console.error("Error regenerating quiz:", error);
-    res.status(500).json({ error: "Failed to regenerate quiz" });
+      // Update the quiz in the database
+      await new Promise((resolve, reject) => {
+        db.run(
+          "UPDATE quiz SET questions = ?, quiz_options = ? WHERE id = ? AND user_id = ?",
+          [
+            JSON.stringify(newQuestions),
+            JSON.stringify(customOptions),
+            quizId,
+            userId,
+          ],
+          function (err) {
+            if (err) reject(err);
+            else resolve();
+          }
+        );
+      });
+
+      res.json({
+        message: "Quiz regenerated successfully",
+        questions: newQuestions,
+        questionsCount: newQuestions.length,
+      });
+    } catch (error) {
+      console.error("Error regenerating quiz:", error);
+      res.status(500).json({ error: "Failed to regenerate quiz" });
+    }
   }
-});
+);
 
 app.get("/health", (req, res) => {
   res.status(200).json({ status: "OK", message: "Server is running" });
@@ -2188,19 +2236,60 @@ app.get("/health/gemini", async (req, res) => {
 });
 
 // Start server
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+const HOST = "0.0.0.0";
+const server = app.listen(PORT, HOST, () => {
+  console.log(`Server running on ${HOST}:${PORT}`);
+  console.log(`Environment: ${process.env.NODE_ENV || "development"}`);
+  console.log(`Database path: ${dbPath}`);
+  console.log(`CORS origin: ${process.env.CORS_ORIGIN || "*"}`);
+  console.log("Server started successfully");
+});
+
+// Handle server startup errors
+server.on("error", (error) => {
+  console.error("Server startup error:", error);
+  process.exit(1);
+});
+
+// Handle uncaught exceptions
+process.on("uncaughtException", (error) => {
+  console.error("Uncaught Exception:", error);
+  process.exit(1);
+});
+
+// Handle unhandled promise rejections
+process.on("unhandledRejection", (reason, promise) => {
+  console.error("Unhandled Rejection at:", promise, "reason:", reason);
+  process.exit(1);
 });
 
 // Graceful shutdown
 process.on("SIGINT", () => {
   console.log("\nShutting down server...");
-  db.close((err) => {
-    if (err) {
-      console.error("Error closing database:", err.message);
-    } else {
-      console.log("Database connection closed.");
-    }
-    process.exit(0);
+  server.close(() => {
+    console.log("HTTP server closed.");
+    db.close((err) => {
+      if (err) {
+        console.error("Error closing database:", err.message);
+      } else {
+        console.log("Database connection closed.");
+      }
+      process.exit(0);
+    });
+  });
+});
+
+process.on("SIGTERM", () => {
+  console.log("\nReceived SIGTERM, shutting down gracefully...");
+  server.close(() => {
+    console.log("HTTP server closed.");
+    db.close((err) => {
+      if (err) {
+        console.error("Error closing database:", err.message);
+      } else {
+        console.log("Database connection closed.");
+      }
+      process.exit(0);
+    });
   });
 });
