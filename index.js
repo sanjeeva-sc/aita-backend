@@ -156,6 +156,16 @@ function initializeDatabase() {
       }
     );
 
+    // Add title column to notes table
+    db.run(
+      `ALTER TABLE notes ADD COLUMN title TEXT DEFAULT NULL`,
+      (err) => {
+        if (err && !err.message.includes("duplicate column")) {
+          console.error("Error adding title column to notes:", err);
+        }
+      }
+    );
+
     // Add new quiz columns for enhanced quiz functionality
     db.run(`ALTER TABLE quiz ADD COLUMN title TEXT DEFAULT NULL`, (err) => {
       if (err && !err.message.includes("duplicate column")) {
@@ -767,9 +777,18 @@ app.post(
       }
 
       // Store in database with user_id and customization options
+      // Extract title from metadata
+      let transcriptTitle = "Transcript";
+      try {
+        const metadata = JSON.parse(metadataJson);
+        transcriptTitle = metadata.title || "Transcript";
+      } catch (e) {
+        console.log("Could not parse metadata for title, using default");
+      }
+
       db.run(
-        "INSERT INTO notes (transcript, notes, format_type, template_id, notes_options, user_id) VALUES (?, ?, ?, ?, ?, ?)",
-        [transcriptText, notes, "html", templateId, notesOptionsJson, userId],
+        "INSERT INTO notes (transcript, notes, format_type, template_id, notes_options, title, user_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [transcriptText, notes, "html", templateId, notesOptionsJson, transcriptTitle, userId],
         function (err) {
           if (err) {
             console.error("Error saving notes:", err);
@@ -780,8 +799,8 @@ app.post(
 
           // quiz is already a stringified questions array from generateQuiz function
           db.run(
-            "INSERT INTO quiz (transcript_id, questions, quiz_options, user_id) VALUES (?, ?, ?, ?)",
-            [notesId, quiz, quizOptionsJson, userId],
+            "INSERT INTO quiz (transcript_id, questions, quiz_options, title, user_id) VALUES (?, ?, ?, ?, ?)",
+            [notesId, quiz, quizOptionsJson, transcriptTitle, userId],
             function (err) {
               if (err) {
                 console.error("Error saving quiz:", err);
@@ -893,9 +912,19 @@ app.get("/api/notes/:id?", ClerkExpressRequireAuth(), (req, res) => {
   const userId = req.auth.userId;
 
   if (id) {
-    // Get specific notes by ID for the authenticated user
+    // Get specific notes by ID for the authenticated user with title from transcripts
     db.get(
-      "SELECT * FROM notes WHERE id = ? AND user_id = ? ORDER BY created_at DESC",
+      `SELECT n.*, 
+              CASE 
+                WHEN t.metadata IS NOT NULL THEN 
+                  COALESCE(json_extract(t.metadata, '$.title'), n.title, 'Notes #' || n.id)
+                ELSE 
+                  COALESCE(n.title, 'Notes #' || n.id)
+              END as title
+       FROM notes n
+       LEFT JOIN transcripts t ON t.notes_id = n.id
+       WHERE n.id = ? AND n.user_id = ? 
+       ORDER BY n.created_at DESC`,
       [id, userId],
       (err, row) => {
         if (err) {
@@ -911,9 +940,19 @@ app.get("/api/notes/:id?", ClerkExpressRequireAuth(), (req, res) => {
       }
     );
   } else {
-    // Get all notes for the authenticated user
+    // Get all notes for the authenticated user with titles from transcripts
     db.all(
-      "SELECT * FROM notes WHERE user_id = ? ORDER BY created_at DESC",
+      `SELECT n.*, 
+              CASE 
+                WHEN t.metadata IS NOT NULL THEN 
+                  COALESCE(json_extract(t.metadata, '$.title'), n.title, 'Notes #' || n.id)
+                ELSE 
+                  COALESCE(n.title, 'Notes #' || n.id)
+              END as title
+       FROM notes n
+       LEFT JOIN transcripts t ON t.notes_id = n.id
+       WHERE n.user_id = ? 
+       ORDER BY n.created_at DESC`,
       [userId],
       (err, rows) => {
         if (err) {
@@ -933,9 +972,18 @@ app.get("/api/quiz/:id?", ClerkExpressRequireAuth(), (req, res) => {
   const userId = req.auth.userId;
 
   if (id) {
-    // Get quiz by quiz ID for the authenticated user
+    // Get quiz by quiz ID for the authenticated user with title from transcripts
     db.get(
-      "SELECT * FROM quiz WHERE id = ? AND user_id = ?",
+      `SELECT q.*, 
+              CASE 
+                WHEN t.metadata IS NOT NULL THEN 
+                  COALESCE(json_extract(t.metadata, '$.title'), q.title, 'Quiz #' || q.id)
+                ELSE 
+                  COALESCE(q.title, 'Quiz #' || q.id)
+              END as title
+       FROM quiz q
+       LEFT JOIN transcripts t ON t.quiz_id = q.id
+       WHERE q.id = ? AND q.user_id = ?`,
       [id, userId],
       (err, row) => {
         if (err) {
@@ -978,16 +1026,23 @@ app.get("/api/quiz/:id?", ClerkExpressRequireAuth(), (req, res) => {
       }
     );
   } else {
-    // Get all quizzes for the authenticated user with results statistics
+    // Get all quizzes for the authenticated user with results statistics and titles from transcripts
     db.all(
       `
       SELECT 
         q.*,
+        CASE 
+          WHEN t.metadata IS NOT NULL THEN 
+            COALESCE(json_extract(t.metadata, '$.title'), q.title, 'Quiz #' || q.id)
+          ELSE 
+            COALESCE(q.title, 'Quiz #' || q.id)
+        END as title,
         COUNT(sr.id) as total_responses,
         AVG(sr.score) as average_score,
         MAX(sr.score) as highest_score,
         MIN(sr.score) as lowest_score
       FROM quiz q
+      LEFT JOIN transcripts t ON t.quiz_id = q.id
       LEFT JOIN shared_quizzes sq ON q.id = sq.quiz_id
       LEFT JOIN student_responses sr ON sq.id = sr.shared_quiz_id
       WHERE q.user_id = ?
