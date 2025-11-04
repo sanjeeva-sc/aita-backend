@@ -618,6 +618,87 @@ async function generateQuiz(transcript, customOptions = null) {
 
 // Routes
 
+// Analyze endpoint - extract keywords with explanations from provided text
+app.post("/analyze", async (req, res) => {
+  try {
+    let text = "";
+    if (req.body && typeof req.body === "object" && req.body.text) {
+      text = String(req.body.text);
+    } else if (typeof req.body === "string") {
+      text = req.body;
+    }
+
+    if (!text || text.trim().length < 5) {
+      return res.status(400).json({
+        error: "Text is required and should be at least 5 characters.",
+      });
+    }
+
+    const service = getGeminiService();
+    if (!service) {
+      return res.status(503).json({
+        error:
+          "AI service is not configured. Please check GEMINI_API_KEY environment variable.",
+      });
+    }
+
+    const prompt = [
+      "You are a helpful assistant. Given the following text, identify the 5-10 most important key terms, acronyms, or phrases that could be hard to understand or would benefit from context.",
+      "For each item, provide a concise, clear explanation (1-2 sentences) suitable for a general audience.",
+      "Return ONLY valid JSON in the following schema and nothing else:",
+      '{"keywords": [{"term": "string", "explanation": "string"}]}.',
+      "Text:",
+      text,
+    ].join("\n");
+
+    const result = await service.generateContent(prompt);
+    if (!result.success) {
+      return res
+        .status(502)
+        .json({ error: "Model returned unexpected format", raw: result.error });
+    }
+
+    let raw = (result.content || "").trim();
+    raw = raw.replace(/```json\n?/g, "").replace(/```\n?/g, "");
+    let parsed;
+    try {
+      parsed = JSON.parse(raw);
+    } catch (e) {
+      const match = raw.match(/\{[\s\S]*\}/);
+      if (match) {
+        try {
+          parsed = JSON.parse(match[0]);
+        } catch (e2) {
+          return res
+            .status(502)
+            .json({ error: "Model returned unexpected format", raw });
+        }
+      } else {
+        return res
+          .status(502)
+          .json({ error: "Model returned unexpected format", raw });
+      }
+    }
+
+    if (!parsed || !Array.isArray(parsed.keywords)) {
+      return res
+        .status(502)
+        .json({ error: "Model returned unexpected format", raw: raw });
+    }
+
+    const keywords = parsed.keywords
+      .filter(
+        (k) => k && typeof k.term === "string" && typeof k.explanation === "string"
+      )
+      .map((k) => ({ term: k.term.trim(), explanation: k.explanation.trim() }))
+      .slice(0, 12);
+
+    res.json({ keywords });
+  } catch (err) {
+    res.status(500).json({ error: err.message || String(err) });
+  }
+});
+
 // Generate AI metadata for a transcript
 async function generateTranscriptMetadata(transcript) {
   try {
