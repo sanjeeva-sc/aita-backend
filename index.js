@@ -62,7 +62,7 @@ app.use(
           return callback(null, true);
         }
       } catch {}
-      return callback(new Error("Not allowed by CORS"));
+      return callback(null, false);
     },
     credentials: true,
     methods: ["GET", "HEAD", "PUT", "PATCH", "POST", "DELETE", "OPTIONS"],
@@ -2448,31 +2448,21 @@ app.post(
 
 
 
-// List students from Clerk (users with role "student")
+// List users from Clerk
 app.get("/api/students", ClerkExpressRequireAuth(), async (req, res) => {
   try {
     const list = await clerkClient.users.getUserList({ limit: 200 });
-    console.log("Clerk user list:", list);
-    const users = Array.isArray(list) ? list : [];
-    console.log("Clerk users:", users);
-    const students = users
-      .filter((u) => {
-        const roles = Array.isArray((u.unsafeMetadata || {}).roles)
-          ? u.unsafeMetadata.roles
-          : [];
-        return roles.includes("student");
-      })
-      .map((u) => ({
-        id: u.id,
-        email:
-          (Array.isArray(u.emailAddresses) &&
-            u.emailAddresses[0]?.emailAddress) ||
-          "",
-        name: [u.firstName || "", u.lastName || ""].join(" ").trim(),
-        imageUrl: u.imageUrl || null,
-      }));
-    console.log("Clerk students:", students);
-    res.json(students);
+    const users = Array.isArray(list?.data) ? list.data : [];
+    const result = users.map((u) => ({
+      id: u.id,
+      email:
+        (Array.isArray(u.emailAddresses) &&
+          u.emailAddresses[0]?.emailAddress) ||
+        "",
+      name: [u.firstName || "", u.lastName || ""].join(" ").trim(),
+      imageUrl: u.imageUrl || null,
+    }));
+    res.json(result);
   } catch (error) {
     res.status(500).json({ error: "Failed to fetch students" });
   }
@@ -2482,23 +2472,16 @@ app.get("/students", ClerkExpressRequireAuth(), async (req, res) => {
   try {
     const list = await clerkClient.users.getUserList({ limit: 200 });
     const users = Array.isArray(list?.data) ? list.data : [];
-    const students = users
-      .filter((u) => {
-        const roles = Array.isArray((u.unsafeMetadata || {}).roles)
-          ? u.unsafeMetadata.roles
-          : [];
-        return roles.includes("student");
-      })
-      .map((u) => ({
-        id: u.id,
-        email:
-          (Array.isArray(u.emailAddresses) &&
-            u.emailAddresses[0]?.emailAddress) ||
-          "",
-        name: [u.firstName || "", u.lastName || ""].join(" ").trim(),
-        imageUrl: u.imageUrl || null,
-      }));
-    res.json(students);
+    const result = users.map((u) => ({
+      id: u.id,
+      email:
+        (Array.isArray(u.emailAddresses) &&
+          u.emailAddresses[0]?.emailAddress) ||
+        "",
+      name: [u.firstName || "", u.lastName || ""].join(" ").trim(),
+      imageUrl: u.imageUrl || null,
+    }));
+    res.json(result);
   } catch (error) {
     res.status(500).json({ error: "Failed to fetch students" });
   }
