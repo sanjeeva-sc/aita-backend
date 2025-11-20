@@ -990,12 +990,10 @@ app.post(
       }
 
       if (!transcriptText || transcriptText.trim() === "") {
-        return res
-          .status(422)
-          .json({
-            error: "Transcription returned empty result",
-            details: transcriptionErrorDetails,
-          });
+        return res.status(422).json({
+          error: "Transcription returned empty result",
+          details: transcriptionErrorDetails,
+        });
       }
 
       const service = getGeminiService();
@@ -1096,12 +1094,10 @@ app.post(
       }
     } catch (error) {
       console.error("Upload-audio error:", error);
-      res
-        .status(500)
-        .json({
-          error: "Failed to process audio recording",
-          details: error?.message || String(error),
-        });
+      res.status(500).json({
+        error: "Failed to process audio recording",
+        details: error?.message || String(error),
+      });
     }
   }
 );
@@ -1139,12 +1135,10 @@ app.get("/api/transcripts", ClerkExpressRequireAuth(), async (req, res) => {
 
     res.json(result);
   } catch (error) {
-    res
-      .status(500)
-      .json({
-        error: "Failed to list transcripts",
-        details: error?.message || String(error),
-      });
+    res.status(500).json({
+      error: "Failed to list transcripts",
+      details: error?.message || String(error),
+    });
   }
 });
 
@@ -2588,6 +2582,7 @@ app.get("/health/gemini", async (req, res) => {
 
 // Start server
 const HOST = "0.0.0.0";
+await connectMongo();
 const server = app.listen(PORT, HOST, () => {
   console.log(`Server running on ${HOST}:${PORT}`);
   console.log(`Environment: ${process.env.NODE_ENV || "development"}`);
