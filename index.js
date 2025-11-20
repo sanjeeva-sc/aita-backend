@@ -1,13 +1,16 @@
 require("dotenv").config();
 const express = require("express");
-const sqlite3 = require("sqlite3").verbose();
 const multer = require("multer");
 const cors = require("cors");
 const path = require("path");
 const fs = require("fs");
 const crypto = require("crypto");
 const { v4: uuidv4 } = require("uuid");
-const { ClerkExpressRequireAuth } = require("@clerk/clerk-sdk-node");
+const {
+  ClerkExpressRequireAuth,
+  clerkClient,
+} = require("@clerk/clerk-sdk-node");
+const { MongoClient, ObjectId } = require("mongodb");
 const GeminiService = require("./services/ollamaService");
 
 const app = express();
@@ -20,9 +23,9 @@ function getGeminiService() {
   if (!geminiService && process.env.GEMINI_API_KEY) {
     try {
       geminiService = new GeminiService();
-      console.log('Gemini service initialized successfully');
+      console.log("Gemini service initialized successfully");
     } catch (error) {
-      console.error('Failed to initialize Gemini service:', error.message);
+      console.error("Failed to initialize Gemini service:", error.message);
       return null;
     }
   }
@@ -30,242 +33,81 @@ function getGeminiService() {
 }
 
 // Middleware
-app.use(cors({ origin: process.env.CORS_ORIGIN || "*" }));
+app.use(
+  cors({
+    origin: [process.env.CORS_ORIGIN || "*", process.env.CORS_ORIGIN1 || "*"],
+  })
+);
 app.use(express.json());
 app.use(express.text());
 
 // Configure multer for file uploads
 const upload = multer({ dest: "uploads/" });
+try { fs.mkdirSync(path.join(__dirname, 'uploads'), { recursive: true }); } catch {}
 
-// Ensure data directory exists for Cloud Run
-const dataDir = "./data";
-if (!fs.existsSync(dataDir)) {
-  fs.mkdirSync(dataDir, { recursive: true });
-}
+// MongoDB connection and initialization
+const MONGO_URI = process.env.MONGO_URI || "mongodb://localhost:27017";
+const MONGO_DB_NAME = process.env.MONGO_DB_NAME || "transcript_notes";
+let mongoClient = null;
+let db = null;
 
-// Initialize SQLite database with proper path for Cloud Run
-const dbPath = process.env.DB_PATH || "./data/transcript_notes.db";
-const db = new sqlite3.Database(dbPath, (err) => {
-  if (err) {
-    console.error("Error opening database:", err.message);
-  } else {
-    console.log(`Connected to SQLite database at ${dbPath}`);
-    initializeDatabase();
+async function connectMongo() {
+  try {
+    mongoClient = new MongoClient(MONGO_URI, {
+      serverSelectionTimeoutMS: 5000,
+    });
+    await mongoClient.connect();
+    db = mongoClient.db(MONGO_DB_NAME);
+    console.log(`Connected to MongoDB at ${MONGO_URI}, db: ${MONGO_DB_NAME}`);
+    await initializeDatabaseMongo();
+  } catch (err) {
+    console.error("MongoDB connection error:", err.message);
   }
-});
-
-// Create tables if they don't exist
-function initializeDatabase() {
-  db.serialize(() => {
-    // Notes table
-    db.run(`CREATE TABLE IF NOT EXISTS notes (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      transcript TEXT NOT NULL,
-      notes TEXT NOT NULL,
-      format_type TEXT DEFAULT 'html',
-      template_id TEXT DEFAULT NULL,
-      user_id TEXT NOT NULL,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    )`);
-
-    // Templates table
-    db.run(`CREATE TABLE IF NOT EXISTS templates (
-      id TEXT PRIMARY KEY,
-      name TEXT NOT NULL,
-      subject TEXT NOT NULL,
-      structure TEXT NOT NULL,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    )`);
-
-    // Quiz table
-    db.run(`CREATE TABLE IF NOT EXISTS quiz (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      transcript_id INTEGER,
-      questions TEXT NOT NULL,
-      user_id TEXT NOT NULL,
-      title TEXT DEFAULT NULL,
-      description TEXT DEFAULT NULL,
-      time_limit INTEGER DEFAULT NULL,
-      show_answers BOOLEAN DEFAULT 1,
-      shuffle_questions BOOLEAN DEFAULT 0,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY (transcript_id) REFERENCES notes (id)
-    )`);
-
-    // Transcripts table for storing uploaded transcripts and AI-generated metadata
-    db.run(`CREATE TABLE IF NOT EXISTS transcripts (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      user_id TEXT NOT NULL,
-      content TEXT NOT NULL,
-      metadata TEXT DEFAULT NULL,
-      notes_id INTEGER,
-      quiz_id INTEGER,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY (notes_id) REFERENCES notes (id),
-      FOREIGN KEY (quiz_id) REFERENCES quiz (id)
-    )`);
-
-    // Shared quizzes table for quiz sharing functionality
-    db.run(`CREATE TABLE IF NOT EXISTS shared_quizzes (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      quiz_id INTEGER NOT NULL,
-      share_token TEXT UNIQUE NOT NULL,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      expires_at DATETIME,
-      FOREIGN KEY (quiz_id) REFERENCES quiz (id)
-    )`);
-
-    // Student responses table for tracking quiz submissions
-    db.run(`CREATE TABLE IF NOT EXISTS student_responses (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      shared_quiz_id INTEGER NOT NULL,
-      student_name TEXT NOT NULL,
-      student_uid TEXT,
-      answers TEXT NOT NULL,
-      score INTEGER,
-      completed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY (shared_quiz_id) REFERENCES shared_quizzes (id)
-    )`);
-
-    // Add new columns to existing notes table if they don't exist
-    db.run(
-      `ALTER TABLE notes ADD COLUMN format_type TEXT DEFAULT 'html'`,
-      (err) => {
-        if (err && !err.message.includes("duplicate column")) {
-          console.error("Error adding format_type column:", err);
-        }
-      }
-    );
-
-    // Add customization options columns
-    db.run(
-      `ALTER TABLE notes ADD COLUMN notes_options TEXT DEFAULT NULL`,
-      (err) => {
-        if (err && !err.message.includes("duplicate column")) {
-          console.error("Error adding notes_options column:", err);
-        }
-      }
-    );
-
-    db.run(
-      `ALTER TABLE quiz ADD COLUMN quiz_options TEXT DEFAULT NULL`,
-      (err) => {
-        if (err && !err.message.includes("duplicate column")) {
-          console.error("Error adding quiz_options column:", err);
-        }
-      }
-    );
-
-    // Add title column to notes table
-    db.run(
-      `ALTER TABLE notes ADD COLUMN title TEXT DEFAULT NULL`,
-      (err) => {
-        if (err && !err.message.includes("duplicate column")) {
-          console.error("Error adding title column to notes:", err);
-        }
-      }
-    );
-
-    // Add new quiz columns for enhanced quiz functionality
-    db.run(`ALTER TABLE quiz ADD COLUMN title TEXT DEFAULT NULL`, (err) => {
-      if (err && !err.message.includes("duplicate column")) {
-        console.error("Error adding title column:", err);
-      }
-    });
-
-    db.run(
-      `ALTER TABLE quiz ADD COLUMN description TEXT DEFAULT NULL`,
-      (err) => {
-        if (err && !err.message.includes("duplicate column")) {
-          console.error("Error adding description column:", err);
-        }
-      }
-    );
-
-    db.run(
-      `ALTER TABLE quiz ADD COLUMN time_limit INTEGER DEFAULT NULL`,
-      (err) => {
-        if (err && !err.message.includes("duplicate column")) {
-          console.error("Error adding time_limit column:", err);
-        }
-      }
-    );
-
-    db.run(
-      `ALTER TABLE quiz ADD COLUMN show_answers BOOLEAN DEFAULT 1`,
-      (err) => {
-        if (err && !err.message.includes("duplicate column")) {
-          console.error("Error adding show_answers column:", err);
-        }
-      }
-    );
-
-    db.run(
-      `ALTER TABLE quiz ADD COLUMN shuffle_questions BOOLEAN DEFAULT 0`,
-      (err) => {
-        if (err && !err.message.includes("duplicate column")) {
-          console.error("Error adding shuffle_questions column:", err);
-        }
-      }
-    );
-
-    db.run(
-      `ALTER TABLE notes ADD COLUMN template_id TEXT DEFAULT NULL`,
-      (err) => {
-        if (err && !err.message.includes("duplicate column")) {
-          console.error("Error adding template_id column:", err);
-        }
-      }
-    );
-
-    db.run(`ALTER TABLE notes ADD COLUMN user_id TEXT DEFAULT NULL`, (err) => {
-      if (err && !err.message.includes("duplicate column")) {
-        console.error("Error adding user_id column to notes:", err);
-      }
-    });
-
-    db.run(`ALTER TABLE quiz ADD COLUMN user_id TEXT DEFAULT NULL`, (err) => {
-      if (err && !err.message.includes("duplicate column")) {
-        console.error("Error adding user_id column to quiz:", err);
-      }
-    });
-
-    // Add analytics tables
-    db.run(`CREATE TABLE IF NOT EXISTS competencies (
-      id TEXT PRIMARY KEY,
-      name TEXT NOT NULL,
-      description TEXT NOT NULL,
-      subject TEXT NOT NULL,
-      category TEXT DEFAULT 'Standard',
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    )`);
-
-    db.run(`CREATE TABLE IF NOT EXISTS quiz_competencies (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      quiz_id INTEGER NOT NULL,
-      competency_id INTEGER NOT NULL,
-      question_index INTEGER,
-      FOREIGN KEY (quiz_id) REFERENCES quiz (id),
-      FOREIGN KEY (competency_id) REFERENCES competencies (id)
-    )`);
-
-    db.run(`CREATE TABLE IF NOT EXISTS user_sessions (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      user_id TEXT NOT NULL,
-      session_start DATETIME DEFAULT CURRENT_TIMESTAMP,
-      session_end DATETIME,
-      device_type TEXT,
-      user_agent TEXT
-    )`);
-
-    // Insert default templates
-    insertDefaultTemplates();
-    insertDefaultCompetencies();
-  });
 }
+
+function getDbOrThrow() {
+  if (!db) {
+    throw new Error("Database unavailable");
+  }
+  return db;
+}
+
+async function initializeDatabaseMongo() {
+  try {
+    await db.collection("notes").createIndex({ user_id: 1, created_at: -1 });
+    await db.collection("quiz").createIndex({ user_id: 1, created_at: -1 });
+    await db
+      .collection("transcripts")
+      .createIndex({ user_id: 1, created_at: -1 });
+    await db
+      .collection("shared_quizzes")
+      .createIndex({ share_token: 1 }, { unique: true });
+    await db
+      .collection("student_responses")
+      .createIndex({ shared_quiz_id: 1, completed_at: -1 });
+    await db.collection("competencies").createIndex({ subject: 1, name: 1 });
+
+
+    const templatesCount = await db.collection("templates").countDocuments();
+    if (templatesCount === 0) {
+      insertDefaultTemplatesMongo();
+    }
+
+    const competenciesCount = await db
+      .collection("competencies")
+      .countDocuments();
+    if (competenciesCount === 0) {
+      insertDefaultCompetenciesMongo();
+    }
+  } catch (err) {
+    console.error("MongoDB initialization error:", err.message);
+  }
+}
+
+
 
 // Function to insert default templates
-function insertDefaultTemplates() {
+function insertDefaultTemplatesMongo() {
   const templates = [
     {
       id: "science",
@@ -357,21 +199,22 @@ function insertDefaultTemplates() {
     },
   ];
 
-  templates.forEach((template) => {
-    db.run(
-      `INSERT OR IGNORE INTO templates (id, name, subject, structure) VALUES (?, ?, ?, ?)`,
-      [template.id, template.name, template.subject, template.structure],
-      (err) => {
-        if (err) {
-          console.error("Error inserting template:", err);
-        }
-      }
-    );
-  });
+  db.collection("templates")
+    .insertMany(
+      templates.map((t) => ({
+        _id: t.id,
+        name: t.name,
+        subject: t.subject,
+        structure: t.structure,
+        created_at: new Date(),
+      })),
+      { ordered: false }
+    )
+    .catch(() => {});
 }
 
 // Insert default competencies for curriculum mapping
-function insertDefaultCompetencies() {
+function insertDefaultCompetenciesMongo() {
   const defaultCompetencies = [
     {
       name: "Reading Comprehension",
@@ -411,22 +254,20 @@ function insertDefaultCompetencies() {
     },
   ];
 
-  defaultCompetencies.forEach((competency) => {
-    db.run(
-      `INSERT OR IGNORE INTO competencies (name, subject, standard, description) VALUES (?, ?, ?, ?)`,
-      [
-        competency.name,
-        competency.subject,
-        competency.standard,
-        competency.description,
-      ],
-      (err) => {
-        if (err) {
-          console.error("Error inserting competency:", err);
-        }
-      }
-    );
-  });
+  db.collection("competencies")
+    .insertMany(
+      defaultCompetencies.map((c) => ({
+        _id: uuidv4(),
+        name: c.name,
+        subject: c.subject,
+        standard: c.standard,
+        description: c.description,
+        category: "Standard",
+        created_at: new Date(),
+      })),
+      { ordered: false }
+    )
+    .catch(() => {});
 }
 
 // Helper function to generate notes using Gemini AI
@@ -483,29 +324,21 @@ async function generateNotes(
     }
 
     // Handle template if provided
-    if (templateId) {
-      const template = await new Promise((resolve, reject) => {
-        db.get(
-          "SELECT * FROM templates WHERE id = ?",
-          [templateId],
-          (err, row) => {
-            if (err) reject(err);
-            else resolve(row);
-          }
-        );
-      });
-
-      if (template) {
-        geminiOptions.template = template;
-      }
+    if (templateId && db) {
+      const template = await db
+        .collection("templates")
+        .findOne({ _id: templateId });
+      if (template) geminiOptions.template = template;
     }
 
     // Generate notes using Gemini service
     const service = getGeminiService();
     if (!service) {
-      throw new Error("Gemini service is not available. Please check GEMINI_API_KEY configuration.");
+      throw new Error(
+        "Gemini service is not available. Please check GEMINI_API_KEY configuration."
+      );
     }
-    
+
     const result = await service.generateNotes(transcript, geminiOptions);
 
     if (result.success) {
@@ -574,9 +407,11 @@ async function generateQuiz(transcript, customOptions = null) {
     // Generate quiz using Gemini service
     const service = getGeminiService();
     if (!service) {
-      throw new Error("Gemini service is not available. Please check GEMINI_API_KEY configuration.");
+      throw new Error(
+        "Gemini service is not available. Please check GEMINI_API_KEY configuration."
+      );
     }
-    
+
     const result = await service.generateQuiz(transcript, geminiOptions);
     console.log("🔍 Gemini service result:", JSON.stringify(result, null, 2));
 
@@ -688,7 +523,8 @@ app.post("/analyze", async (req, res) => {
 
     const keywords = parsed.keywords
       .filter(
-        (k) => k && typeof k.term === "string" && typeof k.explanation === "string"
+        (k) =>
+          k && typeof k.term === "string" && typeof k.explanation === "string"
       )
       .map((k) => ({ term: k.term.trim(), explanation: k.explanation.trim() }))
       .slice(0, 12);
@@ -715,9 +551,11 @@ Transcript:\n${transcript}`;
 
     const service = getGeminiService();
     if (!service) {
-      throw new Error("Gemini service is not available. Please check GEMINI_API_KEY configuration.");
+      throw new Error(
+        "Gemini service is not available. Please check GEMINI_API_KEY configuration."
+      );
     }
-    
+
     const result = await service.generateContent(prompt);
     if (!result.success) {
       throw new Error(result.error || "Failed to generate metadata");
@@ -757,6 +595,158 @@ Transcript:\n${transcript}`;
   }
 }
 
+function mapMimeToEncoding(mime) {
+  if (!mime) return 'WEBM_OPUS';
+  if (mime.includes('webm')) return 'WEBM_OPUS';
+  if (mime.includes('ogg')) return 'OGG_OPUS';
+  if (mime.includes('wav')) return 'LINEAR16';
+  return 'WEBM_OPUS';
+}
+
+async function transcribeAudioFileGCS(localPath, mimeType) {
+  const bucketName = process.env.GCS_BUCKET_NAME;
+  if (!bucketName) {
+    throw new Error('GCS_BUCKET_NAME is not configured');
+  }
+
+  const { Storage } = require('@google-cloud/storage');
+  const { SpeechClient } = require('@google-cloud/speech');
+
+  const storage = new Storage();
+  const speech = new SpeechClient();
+
+  const ext = path.extname(localPath) || (mimeType.includes('webm') ? '.webm' : mimeType.includes('ogg') ? '.ogg' : '.wav');
+  const objectName = `recordings/${uuidv4()}${ext}`;
+
+  await storage.bucket(bucketName).upload(localPath, {
+    destination: objectName,
+    contentType: mimeType || 'application/octet-stream',
+  });
+
+  const gcsUri = `gs://${bucketName}/${objectName}`;
+
+  const encoding = mapMimeToEncoding(mimeType);
+  const request = {
+    audio: { uri: gcsUri },
+    config: {
+      languageCode: process.env.SPEECH_LANGUAGE_CODE || 'en-US',
+      enableAutomaticPunctuation: true,
+      model: process.env.SPEECH_MODEL || 'latest_long',
+      encoding,
+    },
+  };
+
+  const [operation] = await speech.longRunningRecognize(request);
+  const [response] = await operation.promise();
+  const parts = [];
+  for (const result of response.results || []) {
+    const alt = (result.alternatives || [])[0];
+    if (alt && alt.transcript) parts.push(alt.transcript);
+  }
+  return parts.join('\n');
+}
+
+async function transcribeAudioFileGCSV2(localPath, mimeType) {
+  const recognizer = process.env.SPEECH_V2_RECOGNIZER;
+  const bucketName = process.env.GCS_BUCKET_NAME;
+  if (!recognizer) {
+    throw new Error('SPEECH_V2_RECOGNIZER is not configured');
+  }
+  if (!bucketName) {
+    throw new Error('GCS_BUCKET_NAME is not configured');
+  }
+
+  const { Storage } = require('@google-cloud/storage');
+  const { v2 } = require('@google-cloud/speech');
+  const storage = new Storage();
+  const speech = new v2.SpeechClient();
+
+  const ext = path.extname(localPath) || (mimeType.includes('webm') ? '.webm' : mimeType.includes('ogg') ? '.ogg' : '.wav');
+  const objectName = `recordings/${uuidv4()}${ext}`;
+  await storage.bucket(bucketName).upload(localPath, {
+    destination: objectName,
+    contentType: mimeType || 'application/octet-stream',
+  });
+  const gcsUri = `gs://${bucketName}/${objectName}`;
+
+  const request = {
+    recognizer,
+    files: [{ uri: gcsUri }],
+    // Optional config overrides per file are supported; basic config resides in the recognizer
+  };
+
+  const [operation] = await speech.batchRecognize(request);
+  const [response] = await operation.promise();
+  const parts = [];
+  for (const result of (response.results || [])) {
+    const alt = (result.alternatives || [])[0];
+    if (alt && alt.transcript) parts.push(alt.transcript);
+  }
+  return parts.join('\n');
+}
+
+async function transcribeAudioFileLocal(localPath, mimeType) {
+  const { SpeechClient } = require('@google-cloud/speech');
+  const speech = new SpeechClient();
+
+  const encoding = mapMimeToEncoding(mimeType);
+  const audioBytes = fs.readFileSync(localPath).toString('base64');
+  const request = {
+    audio: { content: audioBytes },
+    config: {
+      languageCode: process.env.SPEECH_LANGUAGE_CODE || 'en-US',
+      enableAutomaticPunctuation: true,
+      model: process.env.SPEECH_MODEL || 'latest_long',
+      encoding,
+    },
+  };
+
+  const [operation] = await speech.longRunningRecognize(request);
+  const [response] = await operation.promise();
+  const parts = [];
+  for (const result of response.results || []) {
+    const alt = (result.alternatives || [])[0];
+    if (alt && alt.transcript) parts.push(alt.transcript);
+  }
+  return parts.join('\n');
+}
+
+async function transcribeAudioFile(localPath, mimeType) {
+  try {
+    if (process.env.SPEECH_V2_RECOGNIZER && process.env.GCS_BUCKET_NAME) {
+      return await transcribeAudioFileGCSV2(localPath, mimeType);
+    }
+    if (process.env.GCS_BUCKET_NAME) {
+      return await transcribeAudioFileGCS(localPath, mimeType);
+    }
+    return await transcribeAudioFileLocal(localPath, mimeType);
+  } catch (e) {
+    if (process.env.SPEECH_V2_RECOGNIZER && process.env.GCS_BUCKET_NAME) {
+      try {
+        return await transcribeAudioFileGCS(localPath, mimeType);
+      } catch (e2) {
+        try {
+          return await transcribeAudioFileLocal(localPath, mimeType);
+        } catch (e3) {
+          const err = new Error(`Transcription failed. v2 error: ${e?.message}; v1 GCS error: ${e2?.message}; Local error: ${e3?.message}`);
+          err.details = { v2: String(e?.message || e), v1: String(e2?.message || e2), local: String(e3?.message || e3) };
+          throw err;
+        }
+      }
+    }
+    if (process.env.GCS_BUCKET_NAME) {
+      try {
+        return await transcribeAudioFileLocal(localPath, mimeType);
+      } catch (e2) {
+        const err = new Error(`Transcription failed. GCS error: ${e?.message}; Local error: ${e2?.message}`);
+        err.details = { gcs: String(e?.message || e), local: String(e2?.message || e2) };
+        throw err;
+      }
+    }
+    throw e;
+  }
+}
+
 // Upload transcript and generate notes/quiz
 app.post(
   "/api/upload",
@@ -771,17 +761,12 @@ app.post(
       let quizOptions = null;
 
       if (req.file) {
-        // Read uploaded file
         transcriptText = fs.readFileSync(req.file.path, "utf8");
-        // Clean up uploaded file
         fs.unlinkSync(req.file.path);
-
-        // Check for template ID and customization options in form data
         templateId = req.body.templateId || null;
         notesOptions = req.body.notesOptions || null;
         quizOptions = req.body.quizOptions || null;
       } else if (req.body) {
-        // Handle JSON body with template selection and customization options
         if (typeof req.body === "string") {
           try {
             const bodyData = JSON.parse(req.body);
@@ -790,7 +775,6 @@ app.post(
             notesOptions = bodyData.notesOptions || null;
             quizOptions = bodyData.quizOptions || null;
           } catch (e) {
-            // If not JSON, treat as plain text
             transcriptText = req.body;
           }
         } else if (req.body && typeof req.body === "object") {
@@ -807,32 +791,16 @@ app.post(
         return res.status(400).json({ error: "No transcript provided" });
       }
 
-      // Convert options to JSON strings if they're objects
-      const notesOptionsJson = notesOptions
-        ? typeof notesOptions === "string"
-          ? notesOptions
-          : JSON.stringify(notesOptions)
-        : null;
-      const quizOptionsJson = quizOptions
-        ? typeof quizOptions === "string"
-          ? quizOptions
-          : JSON.stringify(quizOptions)
-        : null;
-
-      // Check Gemini service connection before processing
       const service = getGeminiService();
       if (!service) {
-        console.error("Gemini service not configured");
         return res.status(503).json({
           error:
             "AI service is not configured. Please check GEMINI_API_KEY environment variable.",
           details: "GEMINI_API_KEY environment variable is required",
         });
       }
-      
       const connectionCheck = await service.checkConnection();
       if (!connectionCheck.connected) {
-        console.error("Gemini service unavailable:", connectionCheck.error);
         return res.status(503).json({
           error:
             "AI service is currently unavailable. Please ensure Gemini is properly configured and try again.",
@@ -840,7 +808,6 @@ app.post(
         });
       }
 
-      // Generate notes, quiz, and transcript metadata with template support and customization options
       let notes, quiz, metadataJson;
       try {
         [notes, quiz, metadataJson] = await Promise.all([
@@ -849,7 +816,6 @@ app.post(
           generateTranscriptMetadata(transcriptText),
         ]);
       } catch (aiError) {
-        console.error("AI generation error:", aiError);
         return res.status(500).json({
           error:
             "Failed to generate content with AI service. Please check if Gemini is properly configured and the required models are available.",
@@ -857,704 +823,725 @@ app.post(
         });
       }
 
-      // Store in database with user_id and customization options
-      // Extract title from metadata
       let transcriptTitle = "Transcript";
       try {
         const metadata = JSON.parse(metadataJson);
         transcriptTitle = metadata.title || "Transcript";
-      } catch (e) {
-        console.log("Could not parse metadata for title, using default");
-      }
+      } catch (e) {}
 
-      db.run(
-        "INSERT INTO notes (transcript, notes, format_type, template_id, notes_options, title, user_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        [transcriptText, notes, "html", templateId, notesOptionsJson, transcriptTitle, userId],
-        function (err) {
-          if (err) {
-            console.error("Error saving notes:", err);
-            return res.status(500).json({ error: "Failed to save notes" });
-          }
+      try {
+        const database = getDbOrThrow();
+        const now = new Date();
 
-          const notesId = this.lastID;
+        const notesDoc = {
+          transcript: transcriptText,
+          notes,
+          format_type: "html",
+          template_id: templateId || null,
+          notes_options:
+            typeof notesOptions === "string"
+              ? notesOptions
+              : notesOptions
+              ? JSON.stringify(notesOptions)
+              : null,
+          title: transcriptTitle,
+          user_id: userId,
+          created_at: now,
+        };
+        const notesResult = await database
+          .collection("notes")
+          .insertOne(notesDoc);
+        const notesId = notesResult.insertedId;
 
-          // quiz is already a stringified questions array from generateQuiz function
-          db.run(
-            "INSERT INTO quiz (transcript_id, questions, quiz_options, title, user_id) VALUES (?, ?, ?, ?, ?)",
-            [notesId, quiz, quizOptionsJson, transcriptTitle, userId],
-            function (err) {
-              if (err) {
-                console.error("Error saving quiz:", err);
-                return res.status(500).json({ error: "Failed to save quiz" });
-              }
+        const quizDoc = {
+          transcript_id: notesId,
+          questions: JSON.parse(quiz),
+          quiz_options:
+            typeof quizOptions === "string"
+              ? quizOptions
+              : quizOptions
+              ? JSON.stringify(quizOptions)
+              : null,
+          title: transcriptTitle,
+          user_id: userId,
+          created_at: now,
+        };
+        const quizResult = await database.collection("quiz").insertOne(quizDoc);
+        const quizId = quizResult.insertedId;
 
-              const quizId = this.lastID;
-
-              // Save transcript record with metadata and links
-              db.run(
-                "INSERT INTO transcripts (user_id, content, metadata, notes_id, quiz_id) VALUES (?, ?, ?, ?, ?)",
-                [userId, transcriptText, metadataJson, notesId, quizId],
-                function (err) {
-                  if (err) {
-                    console.error("Error saving transcript record:", err);
-                    // Do not fail the whole request; return success with notes/quiz IDs
-                    return res.json({
-                      success: true,
-                      notesId: notesId,
-                      quizId: quizId,
-                      message:
-                        "Transcript processed with notes and quiz, but metadata save failed",
-                    });
-                  }
-
-                  const transcriptId = this.lastID;
-                  res.json({
-                    success: true,
-                    transcriptId,
-                    notesId: notesId,
-                    quizId: quizId,
-                    message: "Transcript processed successfully",
-                  });
-                }
-              );
+        const transcriptDoc = {
+          user_id: userId,
+          content: transcriptText,
+          metadata: (() => {
+            try {
+              return JSON.parse(metadataJson);
+            } catch {
+              return {};
             }
-          );
-        }
-      );
+          })(),
+          notes_id: notesId,
+          quiz_id: quizId,
+          created_at: now,
+        };
+        const trResult = await database
+          .collection("transcripts")
+          .insertOne(transcriptDoc);
+        const transcriptId = trResult.insertedId;
+
+        res.json({
+          success: true,
+          transcriptId,
+          notesId,
+          quizId,
+          message: "Transcript processed successfully",
+        });
+      } catch (dbErr) {
+        console.error("Database error:", dbErr);
+        res.status(500).json({ error: "Failed to save generated content" });
+      }
     } catch (error) {
-      console.error("Error processing transcript:", error);
       res.status(500).json({ error: "Failed to process transcript" });
     }
   }
 );
 
+// Upload recorded audio, transcribe via Google Cloud Speech, and generate notes/quiz
+app.post(
+  "/api/upload-audio",
+  ClerkExpressRequireAuth(),
+  upload.single("audio"),
+  async (req, res) => {
+    try {
+      const userId = req.auth.userId;
+      if (!req.file) {
+        return res.status(400).json({ error: "No audio file provided" });
+      }
+
+      const localPath = req.file.path;
+      const mimeType = req.file.mimetype || 'audio/webm';
+
+      let transcriptText = '';
+      let transcriptionErrorDetails = null;
+      try {
+        transcriptText = await transcribeAudioFile(localPath, mimeType);
+      } catch (tErr) {
+        transcriptionErrorDetails = tErr?.details || tErr?.message || String(tErr);
+      } finally {
+        try { fs.unlinkSync(localPath); } catch {}
+      }
+
+      if (!transcriptText || transcriptText.trim() === '') {
+        return res.status(422).json({ error: 'Transcription returned empty result', details: transcriptionErrorDetails });
+      }
+
+      const service = getGeminiService();
+      if (!service) {
+        return res.status(503).json({
+          error: "AI service is not configured. Please check GEMINI_API_KEY environment variable.",
+        });
+      }
+      const connectionCheck = await service.checkConnection();
+      if (!connectionCheck.connected) {
+        return res.status(503).json({
+          error: "AI service is currently unavailable. Please ensure Gemini is properly configured and try again.",
+          details: connectionCheck.error,
+        });
+      }
+
+      let notes, quiz, metadataJson;
+      try {
+        [notes, quiz, metadataJson] = await Promise.all([
+          generateNotes(transcriptText, null, null),
+          generateQuiz(transcriptText, null),
+          generateTranscriptMetadata(transcriptText),
+        ]);
+      } catch (aiError) {
+        return res.status(500).json({
+          error: "Failed to generate content with AI service.",
+          details: aiError.message,
+        });
+      }
+
+      let transcriptTitle = "Transcript";
+      try {
+        const metadata = JSON.parse(metadataJson);
+        transcriptTitle = metadata.title || "Transcript";
+      } catch {}
+
+      try {
+        const database = getDbOrThrow();
+        const now = new Date();
+
+        const notesDoc = {
+          transcript: transcriptText,
+          notes,
+          format_type: "html",
+          template_id: null,
+          notes_options: null,
+          title: transcriptTitle,
+          user_id: userId,
+          created_at: now,
+        };
+        const notesResult = await database.collection("notes").insertOne(notesDoc);
+        const notesId = notesResult.insertedId;
+
+        const quizDoc = {
+          transcript_id: notesId,
+          questions: JSON.parse(quiz),
+          quiz_options: null,
+          title: transcriptTitle,
+          user_id: userId,
+          created_at: now,
+        };
+        const quizResult = await database.collection("quiz").insertOne(quizDoc);
+        const quizId = quizResult.insertedId;
+
+        const transcriptDoc = {
+          user_id: userId,
+          content: transcriptText,
+          metadata: (() => { try { return JSON.parse(metadataJson); } catch { return {}; } })(),
+          notes_id: notesId,
+          quiz_id: quizId,
+          created_at: now,
+        };
+        const trResult = await database.collection("transcripts").insertOne(transcriptDoc);
+        const transcriptId = trResult.insertedId;
+
+        res.json({ success: true, transcriptId, notesId, quizId, message: "Recording processed successfully" });
+      } catch (dbErr) {
+        console.error("Database error:", dbErr);
+        res.status(500).json({ error: "Failed to save generated content" });
+      }
+    } catch (error) {
+      console.error('Upload-audio error:', error);
+      res.status(500).json({ error: "Failed to process audio recording", details: error?.message || String(error) });
+    }
+  }
+);
+
 // List transcripts for the authenticated user
-app.get("/api/transcripts", ClerkExpressRequireAuth(), (req, res) => {
+app.get("/api/transcripts", ClerkExpressRequireAuth(), async (req, res) => {
   try {
     const userId = req.auth.userId;
-    db.all(
-      "SELECT t.id, t.content, t.metadata, t.notes_id, t.quiz_id, t.created_at FROM transcripts t WHERE t.user_id = ? ORDER BY t.created_at DESC",
-      [userId],
-      (err, rows) => {
-        if (err) {
-          console.error("Error fetching transcripts:", err);
-          return res.status(500).json({ error: "Failed to fetch transcripts" });
-        }
+    const database = getDbOrThrow();
+    const rows = await database
+      .collection("transcripts")
+      .find({ user_id: userId })
+      .sort({ created_at: -1 })
+      .toArray();
 
-        const result = rows.map((row) => {
-          let meta = {};
-          try {
-            meta = JSON.parse(row.metadata || "{}");
-          } catch (e) {
-            meta = {};
-          }
+    const result = rows.map((row) => {
+      const meta = row.metadata || {};
+      const wordCount = row.content
+        ? row.content.trim().split(/\s+/).length
+        : 0;
+      return {
+        id: row._id,
+        title: meta.title || `Transcript ${row._id}`,
+        contentSnippet: (row.content || "").slice(0, 300),
+        uploadDate: row.created_at,
+        status: "completed",
+        notesGenerated: !!row.notes_id,
+        quizGenerated: !!row.quiz_id,
+        notesId: row.notes_id || null,
+        quizId: row.quiz_id || null,
+        wordCount,
+        metadata: meta,
+      };
+    });
 
-          const wordCount = row.content
-            ? row.content.trim().split(/\s+/).length
-            : 0;
-          return {
-            id: row.id,
-            title: meta.title || `Transcript ${row.id}`,
-            contentSnippet: (row.content || "").slice(0, 300),
-            uploadDate: row.created_at,
-            status: "completed",
-            notesGenerated: !!row.notes_id,
-            quizGenerated: !!row.quiz_id,
-            notesId: row.notes_id || null,
-            quizId: row.quiz_id || null,
-            wordCount,
-            metadata: meta,
-          };
-        });
-
-        res.json(result);
-      }
-    );
+    res.json(result);
   } catch (error) {
-    console.error("Error in /api/transcripts:", error);
     res.status(500).json({ error: "Failed to list transcripts" });
   }
 });
 
 // Get templates
-app.get("/api/templates", (req, res) => {
-  db.all("SELECT * FROM templates ORDER BY subject, name", [], (err, rows) => {
-    if (err) {
-      console.error("Error fetching templates:", err);
-      return res.status(500).json({ error: "Failed to fetch templates" });
-    }
-    res.json(rows);
-  });
+app.get("/api/templates", async (req, res) => {
+  try {
+    const database = getDbOrThrow();
+    const rows = await database
+      .collection("templates")
+      .find({})
+      .sort({ subject: 1, name: 1 })
+      .toArray();
+    res.json(
+      rows.map((r) => ({
+        id: r._id,
+        name: r.name,
+        subject: r.subject,
+        structure: r.structure,
+        created_at: r.created_at,
+      }))
+    );
+  } catch (err) {
+    res.status(500).json({ error: "Failed to fetch templates" });
+  }
 });
 
 // Get notes
-app.get("/api/notes/:id?", ClerkExpressRequireAuth(), (req, res) => {
+app.get("/api/notes/:id?", ClerkExpressRequireAuth(), async (req, res) => {
   const { id } = req.params;
   const userId = req.auth.userId;
-
-  if (id) {
-    // Get specific notes by ID for the authenticated user with title from transcripts
-    db.get(
-      `SELECT n.*, 
-              CASE 
-                WHEN t.metadata IS NOT NULL THEN 
-                  COALESCE(json_extract(t.metadata, '$.title'), n.title, 'Notes #' || n.id)
-                ELSE 
-                  COALESCE(n.title, 'Notes #' || n.id)
-              END as title
-       FROM notes n
-       LEFT JOIN transcripts t ON t.notes_id = n.id
-       WHERE n.id = ? AND n.user_id = ? 
-       ORDER BY n.created_at DESC`,
-      [id, userId],
-      (err, row) => {
-        if (err) {
-          console.error("Error fetching notes:", err);
-          return res.status(500).json({ error: "Failed to fetch notes" });
-        }
-
-        if (!row) {
-          return res.status(404).json({ error: "Notes not found" });
-        }
-
-        res.json(row);
-      }
-    );
-  } else {
-    // Get all notes for the authenticated user with titles from transcripts
-    db.all(
-      `SELECT n.*, 
-              CASE 
-                WHEN t.metadata IS NOT NULL THEN 
-                  COALESCE(json_extract(t.metadata, '$.title'), n.title, 'Notes #' || n.id)
-                ELSE 
-                  COALESCE(n.title, 'Notes #' || n.id)
-              END as title
-       FROM notes n
-       LEFT JOIN transcripts t ON t.notes_id = n.id
-       WHERE n.user_id = ? 
-       ORDER BY n.created_at DESC`,
-      [userId],
-      (err, rows) => {
-        if (err) {
-          console.error("Error fetching notes:", err);
-          return res.status(500).json({ error: "Failed to fetch notes" });
-        }
-
-        res.json(rows);
-      }
-    );
+  try {
+    const database = getDbOrThrow();
+    if (id) {
+      const note = await database
+        .collection("notes")
+        .findOne({ _id: new ObjectId(id), user_id: userId });
+      if (!note) return res.status(404).json({ error: "Notes not found" });
+      const tr = await database
+        .collection("transcripts")
+        .findOne({ notes_id: note._id });
+      const title =
+        tr && tr.metadata && tr.metadata.title
+          ? tr.metadata.title
+          : note.title || `Notes #${note._id}`;
+      res.json({ ...note, title });
+    } else {
+      const notes = await database
+        .collection("notes")
+        .find({ user_id: userId })
+        .sort({ created_at: -1 })
+        .toArray();
+      const results = await Promise.all(
+        notes.map(async (n) => {
+          const tr = await database
+            .collection("transcripts")
+            .findOne({ notes_id: n._id });
+          const title =
+            tr && tr.metadata && tr.metadata.title
+              ? tr.metadata.title
+              : n.title || `Notes #${n._id}`;
+          return { ...n, title };
+        })
+      );
+      res.json(results);
+    }
+  } catch (err) {
+    res.status(500).json({ error: "Failed to fetch notes" });
   }
 });
 
 // Get quiz
-app.get("/api/quiz/:id?", ClerkExpressRequireAuth(), (req, res) => {
+app.get("/api/quiz/:id?", ClerkExpressRequireAuth(), async (req, res) => {
   const { id } = req.params;
   const userId = req.auth.userId;
+  try {
+    const database = getDbOrThrow();
+    if (id) {
+      const q = await database
+        .collection("quiz")
+        .findOne({ _id: new ObjectId(id), user_id: userId });
+      if (!q) return res.status(404).json({ error: "Quiz not found" });
+      const tr = await database
+        .collection("transcripts")
+        .findOne({ quiz_id: q._id });
+      const title =
+        tr && tr.metadata && tr.metadata.title
+          ? tr.metadata.title
+          : q.title || `Quiz #${q._id}`;
+      const questionsArray = Array.isArray(q.questions)
+        ? q.questions
+        : q.questions && q.questions.questions
+        ? q.questions.questions
+        : q.questions && q.questions.quiz && q.questions.quiz.questions
+        ? q.questions.quiz.questions
+        : [q.questions];
+      res.json({ ...q, title, questions: questionsArray });
+    } else {
+      const rows = await database
+        .collection("quiz")
+        .find({ user_id: userId })
+        .sort({ created_at: -1 })
+        .toArray();
+      const formatted = await Promise.all(
+        rows.map(async (row) => {
+          const tr = await database
+            .collection("transcripts")
+            .findOne({ quiz_id: row._id });
+          const title =
+            tr && tr.metadata && tr.metadata.title
+              ? tr.metadata.title
+              : row.title || `Quiz #${row._id}`;
+          const questionsArray = Array.isArray(row.questions)
+            ? row.questions
+            : row.questions && row.questions.questions
+            ? row.questions.questions
+            : row.questions &&
+              row.questions.quiz &&
+              row.questions.quiz.questions
+            ? row.questions.quiz.questions
+            : [row.questions];
 
-  if (id) {
-    // Get quiz by quiz ID for the authenticated user with title from transcripts
-    db.get(
-      `SELECT q.*, 
-              CASE 
-                WHEN t.metadata IS NOT NULL THEN 
-                  COALESCE(json_extract(t.metadata, '$.title'), q.title, 'Quiz #' || q.id)
-                ELSE 
-                  COALESCE(q.title, 'Quiz #' || q.id)
-              END as title
-       FROM quiz q
-       LEFT JOIN transcripts t ON t.quiz_id = q.id
-       WHERE q.id = ? AND q.user_id = ?`,
-      [id, userId],
-      (err, row) => {
-        if (err) {
-          console.error("Error fetching quiz:", err);
-          return res.status(500).json({ error: "Failed to fetch quiz" });
-        }
-
-        if (!row) {
-          return res.status(404).json({ error: "Quiz not found" });
-        }
-
-        try {
-          // Parse the JSON quiz data
-          const parsedQuestions = JSON.parse(row.questions);
-
-          // Handle both old and new formats
-          let questionsArray;
-          if (Array.isArray(parsedQuestions)) {
-            // New format: questions is already an array
-            questionsArray = parsedQuestions;
-          } else if (
-            parsedQuestions.questions &&
-            Array.isArray(parsedQuestions.questions)
-          ) {
-            // Old format: questions is nested in a quiz object
-            questionsArray = parsedQuestions.questions;
-          } else if (parsedQuestions.quiz && parsedQuestions.quiz.questions) {
-            // Very old format: questions is nested deeper
-            questionsArray = parsedQuestions.quiz.questions;
-          } else {
-            // Fallback: treat as single question object
-            questionsArray = [parsedQuestions];
-          }
-
-          res.json({ ...row, questions: questionsArray });
-        } catch (parseError) {
-          // If JSON parsing fails, return raw text
-          res.json(row);
-        }
-      }
-    );
-  } else {
-    // Get all quizzes for the authenticated user with results statistics and titles from transcripts
-    db.all(
-      `
-      SELECT 
-        q.*,
-        CASE 
-          WHEN t.metadata IS NOT NULL THEN 
-            COALESCE(json_extract(t.metadata, '$.title'), q.title, 'Quiz #' || q.id)
-          ELSE 
-            COALESCE(q.title, 'Quiz #' || q.id)
-        END as title,
-        COUNT(sr.id) as total_responses,
-        AVG(sr.score) as average_score,
-        MAX(sr.score) as highest_score,
-        MIN(sr.score) as lowest_score
-      FROM quiz q
-      LEFT JOIN transcripts t ON t.quiz_id = q.id
-      LEFT JOIN shared_quizzes sq ON q.id = sq.quiz_id
-      LEFT JOIN student_responses sr ON sq.id = sr.shared_quiz_id
-      WHERE q.user_id = ?
-      GROUP BY q.id
-      ORDER BY q.created_at DESC
-    `,
-      [userId],
-      (err, rows) => {
-        if (err) {
-          console.error("Error fetching quizzes:", err);
-          return res.status(500).json({ error: "Failed to fetch quizzes" });
-        }
-
-        // Parse quiz questions and format the response
-        const formattedQuizzes = rows.map((row) => {
-          try {
-            // Parse the JSON quiz data
-            const parsedQuestions = JSON.parse(row.questions);
-
-            // Handle both old and new formats
-            let questionsArray;
-            if (Array.isArray(parsedQuestions)) {
-              // New format: questions is already an array
-              questionsArray = parsedQuestions;
-            } else if (
-              parsedQuestions.questions &&
-              Array.isArray(parsedQuestions.questions)
-            ) {
-              // Old format: questions is nested in a quiz object
-              questionsArray = parsedQuestions.questions;
-            } else if (parsedQuestions.quiz && parsedQuestions.quiz.questions) {
-              // Very old format: questions is nested deeper
-              questionsArray = parsedQuestions.quiz.questions;
-            } else {
-              // Fallback: treat as single question object
-              questionsArray = [parsedQuestions];
-            }
-
-            return {
-              ...row,
-              questions: questionsArray,
-              statistics: {
-                total_responses: row.total_responses || 0,
-                average_score: row.average_score
-                  ? Math.round(row.average_score * 100) / 100
-                  : null,
-                highest_score: row.highest_score || null,
-                lowest_score: row.lowest_score || null,
+          const statsAgg = await database
+            .collection("student_responses")
+            .aggregate([
+              {
+                $lookup: {
+                  from: "shared_quizzes",
+                  localField: "shared_quiz_id",
+                  foreignField: "_id",
+                  as: "sq",
+                },
               },
-            };
-          } catch (parseError) {
-            return {
-              ...row,
-              statistics: {
-                total_responses: row.total_responses || 0,
-                average_score: row.average_score
-                  ? Math.round(row.average_score * 100) / 100
-                  : null,
-                highest_score: row.highest_score || null,
-                lowest_score: row.lowest_score || null,
+              { $unwind: "$sq" },
+              { $match: { "sq.quiz_id": row._id } },
+              {
+                $group: {
+                  _id: null,
+                  total_responses: { $sum: 1 },
+                  average_score: { $avg: "$score" },
+                  highest_score: { $max: "$score" },
+                  lowest_score: { $min: "$score" },
+                },
               },
-            };
-          }
-        });
-
-        res.json(formattedQuizzes);
-      }
-    );
+            ])
+            .toArray();
+          const stats = statsAgg[0] || {};
+          return {
+            ...row,
+            title,
+            questions: questionsArray,
+            statistics: {
+              total_responses: stats.total_responses || 0,
+              average_score: stats.average_score
+                ? Math.round(stats.average_score * 100) / 100
+                : null,
+              highest_score: stats.highest_score || null,
+              lowest_score: stats.lowest_score || null,
+            },
+          };
+        })
+      );
+      res.json(formatted);
+    }
+  } catch (err) {
+    res.status(500).json({ error: "Failed to fetch quizzes" });
   }
 });
 
 // Share quiz endpoint - generates shareable link
-app.post("/api/quiz/:id/share", ClerkExpressRequireAuth(), (req, res) => {
-  const { id } = req.params;
-
-  // First, verify the quiz exists
-  db.get("SELECT * FROM quiz WHERE id = ?", [id], (err, quiz) => {
-    if (err) {
-      console.error("Error fetching quiz:", err);
-      return res.status(500).json({ error: "Failed to fetch quiz" });
-    }
-
-    if (!quiz) {
-      return res.status(404).json({ error: "Quiz not found" });
-    }
-
-    // Generate unique share token
+app.post("/api/quiz/:id/share", ClerkExpressRequireAuth(), async (req, res) => {
+  try {
+    const { id } = req.params;
+    const database = getDbOrThrow();
+    const quiz = await database
+      .collection("quiz")
+      .findOne({ _id: new ObjectId(id) });
+    if (!quiz) return res.status(404).json({ error: "Quiz not found" });
     const shareToken = uuidv4();
-
-    // Set expiration to 30 days from now
     const expiresAt = new Date();
     expiresAt.setDate(expiresAt.getDate() + 30);
-
-    // Insert into shared_quizzes table
-    db.run(
-      "INSERT INTO shared_quizzes (quiz_id, share_token, expires_at) VALUES (?, ?, ?)",
-      [id, shareToken, expiresAt.toISOString()],
-      function (err) {
-        if (err) {
-          console.error("Error creating shared quiz:", err);
-          return res
-            .status(500)
-            .json({ error: "Failed to create shareable link" });
-        }
-
-        // Return the shareable URL
-        const shareableUrl = `/quiz/take/${shareToken}`;
-
-        res.json({
-          success: true,
-          shareToken,
-          shareableUrl,
-          expiresAt: expiresAt.toISOString(),
-          message: "Shareable quiz link created successfully",
-        });
-      }
-    );
-  });
+    await database.collection("shared_quizzes").insertOne({
+      quiz_id: quiz._id,
+      share_token: shareToken,
+      created_at: new Date(),
+      expires_at: expiresAt,
+    });
+    const shareableUrl = `/quiz/take/${shareToken}`;
+    res.json({
+      success: true,
+      shareToken,
+      shareableUrl,
+      expiresAt: expiresAt.toISOString(),
+      message: "Shareable quiz link created successfully",
+    });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to create shareable link" });
+  }
 });
 
 // Public endpoint to get quiz by share token (no authentication required)
-app.get("/api/quiz/shared/:token", (req, res) => {
-  const { token } = req.params;
-
-  // First, find the shared quiz by token and check if it's valid and not expired
-  db.get(
-    `SELECT sq.*, q.questions, q.created_at as quiz_created_at 
-     FROM shared_quizzes sq 
-     JOIN quiz q ON sq.quiz_id = q.id 
-     WHERE sq.share_token = ? AND (sq.expires_at IS NULL OR sq.expires_at > datetime('now'))`,
-    [token],
-    (err, row) => {
-      if (err) {
-        console.error("Error fetching shared quiz:", err);
-        return res.status(500).json({ error: "Failed to fetch quiz" });
-      }
-
-      if (!row) {
-        return res.status(404).json({ error: "Quiz not found or expired" });
-      }
-
-      try {
-        // Parse the JSON quiz data
-        const quizData = JSON.parse(row.questions);
-
-        // The quiz data has a 'questions' array, so we need to access it properly
-        const questions = quizData.questions || quizData;
-
-        // Ensure questions is an array before mapping
-        if (!Array.isArray(questions)) {
-          console.error("Questions is not an array:", questions);
-          return res.status(500).json({
-            error: "Invalid quiz data format - questions must be an array",
-          });
-        }
-
-        // Remove correct answers from questions for student view
-        const questionsWithoutAnswers = questions.map((question) => {
-          const { correct_answer, ...questionWithoutAnswer } = question;
-          return questionWithoutAnswer;
-        });
-
-        // Return quiz data without correct answers
-        res.json({
-          id: row.quiz_id,
-          questions: { questions: questionsWithoutAnswers },
-          created_at: row.quiz_created_at,
-          share_token: row.share_token,
-          expires_at: row.expires_at,
-        });
-      } catch (parseError) {
-        console.error("Error parsing quiz questions:", parseError);
-        return res.status(500).json({ error: "Invalid quiz data format" });
-      }
-    }
-  );
+app.get("/api/quiz/shared/:token", async (req, res) => {
+  try {
+    const { token } = req.params;
+    const database = getDbOrThrow();
+    const row = await database
+      .collection("shared_quizzes")
+      .aggregate([
+        {
+          $match: {
+            share_token: token,
+            $or: [{ expires_at: null }, { expires_at: { $gt: new Date() } }],
+          },
+        },
+        {
+          $lookup: {
+            from: "quiz",
+            localField: "quiz_id",
+            foreignField: "_id",
+            as: "quiz",
+          },
+        },
+        { $unwind: "$quiz" },
+        {
+          $project: {
+            share_token: 1,
+            expires_at: 1,
+            quiz_id: "$quiz._id",
+            questions: "$quiz.questions",
+            quiz_created_at: "$quiz.created_at",
+          },
+        },
+      ])
+      .next();
+    if (!row)
+      return res.status(404).json({ error: "Quiz not found or expired" });
+    const questions = Array.isArray(row.questions)
+      ? row.questions
+      : row.questions?.questions || [];
+    if (!Array.isArray(questions))
+      return res.status(500).json({
+        error: "Invalid quiz data format - questions must be an array",
+      });
+    const questionsWithoutAnswers = questions.map((question) => {
+      const { correct_answer, ...questionWithoutAnswer } = question;
+      return questionWithoutAnswer;
+    });
+    res.json({
+      id: row.quiz_id,
+      questions: { questions: questionsWithoutAnswers },
+      created_at: row.quiz_created_at,
+      share_token: row.share_token,
+      expires_at: row.expires_at,
+    });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to fetch quiz" });
+  }
 });
 
 // Submit quiz answers
-app.post("/api/quiz/shared/:token/submit", (req, res) => {
-  const { token } = req.params;
-  const { student_name, student_uid, answers } = req.body;
-
-  // Validate required fields
-  if (!student_name || !answers || !Array.isArray(answers)) {
-    return res.status(400).json({
-      error:
-        "Missing required fields: student_name and answers array are required",
-    });
-  }
-
-  // First, find the shared quiz by token and get the correct answers
-  db.get(
-    `SELECT sq.id as shared_quiz_id, sq.quiz_id, q.questions 
-     FROM shared_quizzes sq 
-     JOIN quiz q ON sq.quiz_id = q.id 
-     WHERE sq.share_token = ? AND (sq.expires_at IS NULL OR sq.expires_at > datetime('now'))`,
-    [token],
-    (err, row) => {
-      if (err) {
-        console.error("Error fetching shared quiz:", err);
-        return res.status(500).json({ error: "Failed to fetch quiz" });
-      }
-
-      if (!row) {
-        return res.status(404).json({ error: "Quiz not found or expired" });
-      }
-
-      try {
-        // Parse the quiz questions to get correct answers
-        const quizData = JSON.parse(row.questions);
-        console.log("Raw quizData:", JSON.stringify(quizData, null, 2));
-
-        // The quiz data has a 'questions' array, so we need to access it properly
-        const questions = quizData.questions || quizData;
-        console.log("Extracted questions:", JSON.stringify(questions, null, 2));
-
-        // Calculate score by comparing student answers with correct answers
-        let score = 0;
-        const totalQuestions = questions.length;
-        const results = [];
-
-        for (let i = 0; i < totalQuestions; i++) {
-          const question = questions[i];
-          const studentAnswer = answers[i];
-          console.log(
-            "Student answer:",
-            studentAnswer,
-            "Correct answer:",
-            question.correct_answer
-          );
-          const isCorrect = studentAnswer === question.correct_answer;
-
-          if (isCorrect) {
-            score++;
-          }
-
-          results.push({
-            questionIndex: i,
-            question: question.question,
-            studentAnswer: studentAnswer,
-            correctAnswer: question.correct_answer,
-            isCorrect: isCorrect,
-          });
-        }
-
-        const finalScore = Math.round((score / totalQuestions) * 100);
-
-        // Store the student response in the database
-        db.run(
-          `INSERT INTO student_responses (shared_quiz_id, student_name, student_uid, answers, score) 
-           VALUES (?, ?, ?, ?, ?)`,
-          [
-            row.shared_quiz_id,
-            student_name,
-            student_uid || null,
-            JSON.stringify(answers),
-            finalScore,
-          ],
-          function (err) {
-            if (err) {
-              console.error("Error storing student response:", err);
-              return res
-                .status(500)
-                .json({ error: "Failed to store response" });
-            }
-
-            // Return immediate score and correct answers
-            res.json({
-              success: true,
-              score: finalScore,
-              correctAnswers: score,
-              totalQuestions: totalQuestions,
-              percentage: finalScore,
-              results: results,
-              submissionId: this.lastID,
-            });
-          }
-        );
-      } catch (parseError) {
-        console.error("Error parsing quiz questions:", parseError);
-        return res.status(500).json({ error: "Invalid quiz data format" });
-      }
+app.post("/api/quiz/shared/:token/submit", async (req, res) => {
+  try {
+    const { token } = req.params;
+    const { student_name, student_uid, answers } = req.body;
+    if (!student_name || !answers || !Array.isArray(answers)) {
+      return res.status(400).json({
+        error:
+          "Missing required fields: student_name and answers array are required",
+      });
     }
-  );
+    const database = getDbOrThrow();
+    const row = await database
+      .collection("shared_quizzes")
+      .aggregate([
+        {
+          $match: {
+            share_token: token,
+            $or: [{ expires_at: null }, { expires_at: { $gt: new Date() } }],
+          },
+        },
+        {
+          $lookup: {
+            from: "quiz",
+            localField: "quiz_id",
+            foreignField: "_id",
+            as: "quiz",
+          },
+        },
+        { $unwind: "$quiz" },
+        {
+          $project: {
+            _id: 1,
+            quiz_id: "$quiz._id",
+            questions: "$quiz.questions",
+          },
+        },
+      ])
+      .next();
+    if (!row)
+      return res.status(404).json({ error: "Quiz not found or expired" });
+    const questions = Array.isArray(row.questions)
+      ? row.questions
+      : row.questions?.questions || [];
+    const totalQuestions = questions.length;
+    const results = [];
+    let score = 0;
+    for (let i = 0; i < totalQuestions; i++) {
+      const question = questions[i];
+      const studentAnswer = answers[i];
+      const isCorrect = studentAnswer === question.correct_answer;
+      if (isCorrect) score++;
+      results.push({
+        questionIndex: i,
+        question: question.question,
+        studentAnswer,
+        correctAnswer: question.correct_answer,
+        isCorrect,
+      });
+    }
+    const finalScore = Math.round((score / totalQuestions) * 100);
+    const insertResult = await database
+      .collection("student_responses")
+      .insertOne({
+        shared_quiz_id: row._id,
+        student_name,
+        student_uid: student_uid || null,
+        answers,
+        score: finalScore,
+        completed_at: new Date(),
+      });
+    res.json({
+      success: true,
+      score: finalScore,
+      correctAnswers: score,
+      totalQuestions,
+      percentage: finalScore,
+      results,
+      submissionId: insertResult.insertedId,
+    });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to submit quiz" });
+  }
 });
 
 // Get quiz results for a specific quiz
-app.get("/api/quiz/:id/results", ClerkExpressRequireAuth(), (req, res) => {
-  const { id } = req.params;
-
-  // Get all student responses for shared quizzes of this quiz
-  db.all(
-    `SELECT 
-      sr.student_name,
-      sr.student_uid,
-      sr.score,
-      sr.completed_at
-     FROM student_responses sr
-     JOIN shared_quizzes sq ON sr.shared_quiz_id = sq.id
-     WHERE sq.quiz_id = ?
-     ORDER BY sr.completed_at DESC`,
-    [id],
-    (err, rows) => {
-      if (err) {
-        console.error("Error fetching quiz results:", err);
-        return res.status(500).json({ error: "Failed to fetch quiz results" });
-      }
-
-      // Format the results according to requirements
+app.get(
+  "/api/quiz/:id/results",
+  ClerkExpressRequireAuth(),
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+      const database = getDbOrThrow();
+      const rows = await database
+        .collection("student_responses")
+        .aggregate([
+          {
+            $lookup: {
+              from: "shared_quizzes",
+              localField: "shared_quiz_id",
+              foreignField: "_id",
+              as: "sq",
+            },
+          },
+          { $unwind: "$sq" },
+          { $match: { "sq.quiz_id": new ObjectId(id) } },
+          { $sort: { completed_at: -1 } },
+          {
+            $project: {
+              student_name: 1,
+              student_uid: 1,
+              score: 1,
+              completed_at: 1,
+            },
+          },
+        ])
+        .toArray();
       const results = rows.map((row) => ({
         student_name: row.student_name,
         student_uid: row.student_uid || "N/A",
         score: row.score,
         completed_at: row.completed_at,
       }));
-
-      // Return array directly as specified in requirements
       res.json(results);
+    } catch (err) {
+      res.status(500).json({ error: "Failed to fetch quiz results" });
     }
-  );
-});
+  }
+);
 
 // Get all sessions
-app.get("/api/sessions", (req, res) => {
-  db.all(
-    "SELECT id, created_at FROM notes ORDER BY created_at DESC",
-    [],
-    (err, rows) => {
-      if (err) {
-        console.error("Error fetching sessions:", err);
-        return res.status(500).json({ error: "Failed to fetch sessions" });
-      }
-      res.json(rows);
-    }
-  );
+app.get("/api/sessions", async (req, res) => {
+  try {
+    const database = getDbOrThrow();
+    const rows = await database
+      .collection("notes")
+      .find({}, { projection: { created_at: 1 } })
+      .sort({ created_at: -1 })
+      .toArray();
+    res.json(rows.map((r) => ({ id: r._id, created_at: r.created_at })));
+  } catch (err) {
+    res.status(500).json({ error: "Failed to fetch sessions" });
+  }
 });
 
 // Get session by ID
-app.get("/api/sessions/:id", (req, res) => {
-  const { id } = req.params;
-  db.get("SELECT * FROM notes WHERE id = ?", [id], (err, row) => {
-    if (err) {
-      console.error("Error fetching session:", err);
-      return res.status(500).json({ error: "Failed to fetch session" });
-    }
-    if (!row) {
-      return res.status(404).json({ error: "Session not found" });
-    }
+app.get("/api/sessions/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const database = getDbOrThrow();
+    const row = await database
+      .collection("notes")
+      .findOne({ _id: new ObjectId(id) });
+    if (!row) return res.status(404).json({ error: "Session not found" });
     res.json(row);
-  });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to fetch session" });
+  }
 });
 
 // Delete session
-app.delete("/api/sessions/:id", (req, res) => {
-  const { id } = req.params;
-  db.run("DELETE FROM notes WHERE id = ?", [id], function (err) {
-    if (err) {
-      console.error("Error deleting session:", err);
-      return res.status(500).json({ error: "Failed to delete session" });
-    }
-    if (this.changes === 0) {
+app.delete("/api/sessions/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const database = getDbOrThrow();
+    const result = await database
+      .collection("notes")
+      .deleteOne({ _id: new ObjectId(id) });
+    if (result.deletedCount === 0)
       return res.status(404).json({ error: "Session not found" });
-    }
     res.json({ success: true, message: "Session deleted successfully" });
-  });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to delete session" });
+  }
 });
 
 // Health check endpoint});
 
 // Competencies endpoints
-app.get("/api/competencies", ClerkExpressRequireAuth(), (req, res) => {
+app.get("/api/competencies", ClerkExpressRequireAuth(), async (req, res) => {
   try {
     const subject = req.query.subject;
-    let query = "SELECT * FROM competencies";
-    let params = [];
-
-    if (subject) {
-      query += " WHERE subject = ? OR subject = 'General'";
-      params = [subject];
-    }
-
-    query += " ORDER BY subject, name";
-
-    db.all(query, params, (err, rows) => {
-      if (err) {
-        console.error("Error fetching competencies:", err);
-        res.status(500).json({ error: "Failed to fetch competencies" });
-        return;
-      }
-      res.json(rows);
-    });
+    const database = getDbOrThrow();
+    const filter = subject
+      ? { $or: [{ subject }, { subject: "General" }] }
+      : {};
+    const rows = await database
+      .collection("competencies")
+      .find(filter)
+      .sort({ subject: 1, name: 1 })
+      .toArray();
+    res.json(
+      rows.map((r) => ({
+        id: r._id,
+        name: r.name,
+        description: r.description,
+        subject: r.subject,
+        category: r.category,
+      }))
+    );
   } catch (error) {
-    console.error("Competencies error:", error);
     res.status(500).json({ error: "Failed to fetch competencies" });
   }
 });
 
-app.post("/api/competencies", ClerkExpressRequireAuth(), (req, res) => {
+app.post("/api/competencies", ClerkExpressRequireAuth(), async (req, res) => {
   try {
     const { name, description, subject, category } = req.body;
-
     if (!name || !description || !subject) {
       return res
         .status(400)
         .json({ error: "Name, description, and subject are required" });
     }
-
+    const database = getDbOrThrow();
     const id = uuidv4();
-
-    db.run(
-      `INSERT INTO competencies (id, name, description, subject, category) VALUES (?, ?, ?, ?, ?)`,
-      [id, name, description, subject, category || "Custom"],
-      function (err) {
-        if (err) {
-          console.error("Error creating competency:", err);
-          res.status(500).json({ error: "Failed to create competency" });
-          return;
-        }
-
-        res.json({
-          id,
-          name,
-          description,
-          subject,
-          category: category || "Custom",
-        });
-      }
-    );
+    await database.collection("competencies").insertOne({
+      _id: id,
+      name,
+      description,
+      subject,
+      category: category || "Custom",
+      created_at: new Date(),
+    });
+    res.json({
+      id,
+      name,
+      description,
+      subject,
+      category: category || "Custom",
+    });
   } catch (error) {
-    console.error("Create competency error:", error);
     res.status(500).json({ error: "Failed to create competency" });
   }
 });
@@ -1579,31 +1566,43 @@ app.get("/analytics/dashboard", ClerkExpressRequireAuth(), async (req, res) => {
     const startDate = new Date(now.getTime() - daysBack * 24 * 60 * 60 * 1000);
 
     // Get basic metrics
+    const database = getDbOrThrow();
     const [quizCount, notesCount, totalResponses] = await Promise.all([
-      new Promise((resolve, reject) => {
-        db.get(
-          `SELECT COUNT(*) as count FROM quiz WHERE user_id = ? AND created_at >= ?`,
-          [userId, startDate.toISOString()],
-          (err, row) => (err ? reject(err) : resolve(row.count))
-        );
-      }),
-      new Promise((resolve, reject) => {
-        db.get(
-          `SELECT COUNT(*) as count FROM notes WHERE user_id = ? AND created_at >= ?`,
-          [userId, startDate.toISOString()],
-          (err, row) => (err ? reject(err) : resolve(row.count))
-        );
-      }),
-      new Promise((resolve, reject) => {
-        db.get(
-          `SELECT COUNT(*) as count FROM student_responses sr 
-           JOIN shared_quizzes sq ON sr.shared_quiz_id = sq.id 
-           JOIN quiz q ON sq.quiz_id = q.id 
-           WHERE q.user_id = ? AND sr.completed_at >= ?`,
-          [userId, startDate.toISOString()],
-          (err, row) => (err ? reject(err) : resolve(row.count))
-        );
-      }),
+      database
+        .collection("quiz")
+        .countDocuments({ user_id: userId, created_at: { $gte: startDate } }),
+      database
+        .collection("notes")
+        .countDocuments({ user_id: userId, created_at: { $gte: startDate } }),
+      (async () => {
+        const agg = await database
+          .collection("student_responses")
+          .aggregate([
+            { $match: { completed_at: { $gte: startDate } } },
+            {
+              $lookup: {
+                from: "shared_quizzes",
+                localField: "shared_quiz_id",
+                foreignField: "_id",
+                as: "sq",
+              },
+            },
+            { $unwind: "$sq" },
+            {
+              $lookup: {
+                from: "quiz",
+                localField: "sq.quiz_id",
+                foreignField: "_id",
+                as: "q",
+              },
+            },
+            { $unwind: "$q" },
+            { $match: { "q.user_id": userId } },
+            { $count: "count" },
+          ])
+          .toArray();
+        return agg[0]?.count || 0;
+      })(),
     ]);
 
     // Calculate quiz turnaround time (mock data for now)
@@ -1611,20 +1610,40 @@ app.get("/analytics/dashboard", ClerkExpressRequireAuth(), async (req, res) => {
     const timeSaved = quizCount * 2.5; // Assume 2.5 hours saved per quiz
 
     // Get engagement metrics
-    const engagementData = await new Promise((resolve, reject) => {
-      db.all(
-        `SELECT 
-          COUNT(*) as total_attempts,
-          AVG(score) as avg_score,
-          COUNT(CASE WHEN score >= 80 THEN 1 END) as high_scores
-         FROM student_responses sr 
-         JOIN shared_quizzes sq ON sr.shared_quiz_id = sq.id 
-         JOIN quiz q ON sq.quiz_id = q.id 
-         WHERE q.user_id = ? AND sr.completed_at >= ?`,
-        [userId, startDate.toISOString()],
-        (err, rows) => (err ? reject(err) : resolve(rows[0] || {}))
-      );
-    });
+    const engagementAgg = await database
+      .collection("student_responses")
+      .aggregate([
+        { $match: { completed_at: { $gte: startDate } } },
+        {
+          $lookup: {
+            from: "shared_quizzes",
+            localField: "shared_quiz_id",
+            foreignField: "_id",
+            as: "sq",
+          },
+        },
+        { $unwind: "$sq" },
+        {
+          $lookup: {
+            from: "quiz",
+            localField: "sq.quiz_id",
+            foreignField: "_id",
+            as: "q",
+          },
+        },
+        { $unwind: "$q" },
+        { $match: { "q.user_id": userId } },
+        {
+          $group: {
+            _id: null,
+            total_attempts: { $sum: 1 },
+            avg_score: { $avg: "$score" },
+            high_scores: { $sum: { $cond: [{ $gte: ["$score", 80] }, 1, 0] } },
+          },
+        },
+      ])
+      .toArray();
+    const engagementData = engagementAgg[0] || {};
 
     // Mock curriculum coverage data
     const curriculumCoverage = {
@@ -1789,7 +1808,6 @@ app.get("/analytics/dashboard", ClerkExpressRequireAuth(), async (req, res) => {
 
     res.json(analyticsData);
   } catch (error) {
-    console.error("Analytics error:", error);
     res.status(500).json({ error: "Failed to fetch analytics data" });
   }
 });
@@ -1818,31 +1836,43 @@ app.get(
       );
 
       // Get basic metrics
+      const database = getDbOrThrow();
       const [quizCount, notesCount, totalResponses] = await Promise.all([
-        new Promise((resolve, reject) => {
-          db.get(
-            `SELECT COUNT(*) as count FROM quiz WHERE user_id = ? AND created_at >= ?`,
-            [userId, startDate.toISOString()],
-            (err, row) => (err ? reject(err) : resolve(row.count))
-          );
-        }),
-        new Promise((resolve, reject) => {
-          db.get(
-            `SELECT COUNT(*) as count FROM notes WHERE user_id = ? AND created_at >= ?`,
-            [userId, startDate.toISOString()],
-            (err, row) => (err ? reject(err) : resolve(row.count))
-          );
-        }),
-        new Promise((resolve, reject) => {
-          db.get(
-            `SELECT COUNT(*) as count FROM student_responses sr 
-           JOIN shared_quizzes sq ON sr.shared_quiz_id = sq.id 
-           JOIN quiz q ON sq.quiz_id = q.id 
-           WHERE q.user_id = ? AND sr.completed_at >= ?`,
-            [userId, startDate.toISOString()],
-            (err, row) => (err ? reject(err) : resolve(row.count))
-          );
-        }),
+        database
+          .collection("quiz")
+          .countDocuments({ user_id: userId, created_at: { $gte: startDate } }),
+        database
+          .collection("notes")
+          .countDocuments({ user_id: userId, created_at: { $gte: startDate } }),
+        (async () => {
+          const agg = await database
+            .collection("student_responses")
+            .aggregate([
+              { $match: { completed_at: { $gte: startDate } } },
+              {
+                $lookup: {
+                  from: "shared_quizzes",
+                  localField: "shared_quiz_id",
+                  foreignField: "_id",
+                  as: "sq",
+                },
+              },
+              { $unwind: "$sq" },
+              {
+                $lookup: {
+                  from: "quiz",
+                  localField: "sq.quiz_id",
+                  foreignField: "_id",
+                  as: "q",
+                },
+              },
+              { $unwind: "$q" },
+              { $match: { "q.user_id": userId } },
+              { $count: "count" },
+            ])
+            .toArray();
+          return agg[0]?.count || 0;
+        })(),
       ]);
 
       // Calculate quiz turnaround time (mock data for now)
@@ -1850,20 +1880,42 @@ app.get(
       const timeSaved = quizCount * 2.5; // Assume 2.5 hours saved per quiz
 
       // Get engagement metrics
-      const engagementData = await new Promise((resolve, reject) => {
-        db.all(
-          `SELECT 
-          COUNT(*) as total_attempts,
-          AVG(score) as avg_score,
-          COUNT(CASE WHEN score >= 80 THEN 1 END) as high_scores
-         FROM student_responses sr 
-         JOIN shared_quizzes sq ON sr.shared_quiz_id = sq.id 
-         JOIN quiz q ON sq.quiz_id = q.id 
-         WHERE q.user_id = ? AND sr.completed_at >= ?`,
-          [userId, startDate.toISOString()],
-          (err, rows) => (err ? reject(err) : resolve(rows[0] || {}))
-        );
-      });
+      const engagementAgg = await database
+        .collection("student_responses")
+        .aggregate([
+          { $match: { completed_at: { $gte: startDate } } },
+          {
+            $lookup: {
+              from: "shared_quizzes",
+              localField: "shared_quiz_id",
+              foreignField: "_id",
+              as: "sq",
+            },
+          },
+          { $unwind: "$sq" },
+          {
+            $lookup: {
+              from: "quiz",
+              localField: "sq.quiz_id",
+              foreignField: "_id",
+              as: "q",
+            },
+          },
+          { $unwind: "$q" },
+          { $match: { "q.user_id": userId } },
+          {
+            $group: {
+              _id: null,
+              total_attempts: { $sum: 1 },
+              avg_score: { $avg: "$score" },
+              high_scores: {
+                $sum: { $cond: [{ $gte: ["$score", 80] }, 1, 0] },
+              },
+            },
+          },
+        ])
+        .toArray();
+      const engagementData = engagementAgg[0] || {};
 
       // Mock curriculum coverage data
       const curriculumCoverage = {
@@ -2028,7 +2080,6 @@ app.get(
 
       res.json(analyticsData);
     } catch (error) {
-      console.error("Analytics error:", error);
       res.status(500).json({ error: "Failed to fetch analytics data" });
     }
   }
@@ -2067,75 +2118,59 @@ app.get("/analytics/export", ClerkExpressRequireAuth(), async (req, res) => {
 });
 
 // Quiz editing endpoints
-app.put("/api/quiz/:id", ClerkExpressRequireAuth(), (req, res) => {
-  const quizId = req.params.id;
-  const userId = req.auth.userId;
-  const {
-    questions,
-    title,
-    description,
-    timeLimit,
-    showAnswers,
-    shuffleQuestions,
-  } = req.body;
-
-  if (!questions || !Array.isArray(questions)) {
-    return res.status(400).json({ error: "Questions array is required" });
-  }
-
-  // Validate question format
-  for (const question of questions) {
-    if (
-      !question.question ||
-      !question.options ||
-      !Array.isArray(question.options) ||
-      question.options.length < 2 ||
-      !question.correct_answer
-    ) {
-      return res.status(400).json({
-        error:
-          "Each question must have question text, at least 2 options, and a correct answer",
-      });
+app.put("/api/quiz/:id", ClerkExpressRequireAuth(), async (req, res) => {
+  try {
+    const quizId = req.params.id;
+    const userId = req.auth.userId;
+    const {
+      questions,
+      title,
+      description,
+      timeLimit,
+      showAnswers,
+      shuffleQuestions,
+    } = req.body;
+    if (!questions || !Array.isArray(questions)) {
+      return res.status(400).json({ error: "Questions array is required" });
     }
-  }
-
-  const query = `
-    UPDATE quiz 
-    SET questions = ?, title = ?, description = ?, time_limit = ?, show_answers = ?, shuffle_questions = ?
-    WHERE id = ? AND user_id = ?
-  `;
-
-  db.run(
-    query,
-    [
-      JSON.stringify(questions),
-      title || null,
-      description || null,
-      timeLimit || null,
-      showAnswers ? 1 : 0,
-      shuffleQuestions ? 1 : 0,
+    for (const question of questions) {
+      if (
+        !question.question ||
+        !question.options ||
+        !Array.isArray(question.options) ||
+        question.options.length < 2 ||
+        !question.correct_answer
+      ) {
+        return res.status(400).json({
+          error:
+            "Each question must have question text, at least 2 options, and a correct answer",
+        });
+      }
+    }
+    const database = getDbOrThrow();
+    const result = await database.collection("quiz").updateOne(
+      { _id: new ObjectId(quizId), user_id: userId },
+      {
+        $set: {
+          questions,
+          title: title || null,
+          description: description || null,
+          time_limit: timeLimit || null,
+          show_answers: !!showAnswers,
+          shuffle_questions: !!shuffleQuestions,
+        },
+      }
+    );
+    if (result.matchedCount === 0)
+      return res.status(404).json({ error: "Quiz not found or unauthorized" });
+    res.json({
+      message: "Quiz updated successfully",
       quizId,
-      userId,
-    ],
-    function (err) {
-      if (err) {
-        console.error("Error updating quiz:", err);
-        return res.status(500).json({ error: "Failed to update quiz" });
-      }
-
-      if (this.changes === 0) {
-        return res
-          .status(404)
-          .json({ error: "Quiz not found or unauthorized" });
-      }
-
-      res.json({
-        message: "Quiz updated successfully",
-        quizId: quizId,
-        questionsUpdated: questions.length,
-      });
-    }
-  );
+      questionsUpdated: questions.length,
+    });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to update quiz" });
+  }
 });
 
 // AI rewrite single question endpoint
@@ -2155,28 +2190,21 @@ app.post(
     }
 
     try {
-      // First, get the current quiz
-      const quiz = await new Promise((resolve, reject) => {
-        db.get(
-          "SELECT questions FROM quiz WHERE id = ? AND user_id = ?",
-          [quizId, userId],
-          (err, row) => {
-            if (err) reject(err);
-            else resolve(row);
-          }
+      const database = getDbOrThrow();
+      const quiz = await database
+        .collection("quiz")
+        .findOne(
+          { _id: new ObjectId(quizId), user_id: userId },
+          { projection: { questions: 1 } }
         );
-      });
 
       if (!quiz) {
         return res.status(404).json({ error: "Quiz not found" });
       }
 
-      let questions;
-      try {
-        questions = JSON.parse(quiz.questions);
-      } catch (parseErr) {
-        return res.status(500).json({ error: "Invalid quiz data format" });
-      }
+      const questions = Array.isArray(quiz.questions)
+        ? quiz.questions
+        : quiz.questions?.questions || [];
 
       if (questionIndex < 0 || questionIndex >= questions.length) {
         return res.status(400).json({ error: "Invalid question index" });
@@ -2206,10 +2234,11 @@ Please provide a rewritten version that follows the instruction while maintainin
       const service = getGeminiService();
       if (!service) {
         return res.status(503).json({
-          error: "Gemini service is not available. Please check GEMINI_API_KEY configuration."
+          error:
+            "Gemini service is not available. Please check GEMINI_API_KEY configuration.",
         });
       }
-      
+
       const aiResponse = await service.generateContent(rewritePrompt);
 
       // Parse AI response
@@ -2263,16 +2292,12 @@ Please provide a rewritten version that follows the instruction while maintainin
       };
 
       // Save updated questions back to database
-      await new Promise((resolve, reject) => {
-        db.run(
-          "UPDATE quiz SET questions = ? WHERE id = ? AND user_id = ?",
-          [JSON.stringify(questions), quizId, userId],
-          function (err) {
-            if (err) reject(err);
-            else resolve();
-          }
+      await database
+        .collection("quiz")
+        .updateOne(
+          { _id: new ObjectId(quizId), user_id: userId },
+          { $set: { questions } }
         );
-      });
 
       res.json({
         message: "Question rewritten successfully",
@@ -2301,20 +2326,30 @@ app.post(
     }
 
     try {
-      // Get the original transcript for this quiz
-      const transcriptData = await new Promise((resolve, reject) => {
-        db.get(
-          `SELECT t.content, q.title, q.description, q.quiz_options 
-         FROM quiz q 
-         JOIN transcripts t ON q.transcript_id = t.id 
-         WHERE q.id = ? AND q.user_id = ?`,
-          [quizId, userId],
-          (err, row) => {
-            if (err) reject(err);
-            else resolve(row);
-          }
-        );
-      });
+      const database = getDbOrThrow();
+      const transcriptData = await database
+        .collection("quiz")
+        .aggregate([
+          { $match: { _id: new ObjectId(quizId), user_id: userId } },
+          {
+            $lookup: {
+              from: "transcripts",
+              localField: "transcript_id",
+              foreignField: "_id",
+              as: "t",
+            },
+          },
+          { $unwind: "$t" },
+          {
+            $project: {
+              content: "$t.content",
+              title: "$title",
+              description: "$description",
+              quiz_options: "$quiz_options",
+            },
+          },
+        ])
+        .next();
 
       if (!transcriptData) {
         return res.status(404).json({ error: "Quiz or transcript not found" });
@@ -2324,11 +2359,12 @@ app.post(
       let quizOptions = {};
       try {
         if (transcriptData.quiz_options) {
-          quizOptions = JSON.parse(transcriptData.quiz_options);
+          quizOptions =
+            typeof transcriptData.quiz_options === "string"
+              ? JSON.parse(transcriptData.quiz_options)
+              : transcriptData.quiz_options;
         }
-      } catch (parseErr) {
-        console.log("Using default quiz options");
-      }
+      } catch (parseErr) {}
 
       // Create custom options with the user's prompt
       const customOptions = {
@@ -2352,21 +2388,12 @@ app.post(
       }
 
       // Update the quiz in the database
-      await new Promise((resolve, reject) => {
-        db.run(
-          "UPDATE quiz SET questions = ?, quiz_options = ? WHERE id = ? AND user_id = ?",
-          [
-            JSON.stringify(newQuestions),
-            JSON.stringify(customOptions),
-            quizId,
-            userId,
-          ],
-          function (err) {
-            if (err) reject(err);
-            else resolve();
-          }
+      await database
+        .collection("quiz")
+        .updateOne(
+          { _id: new ObjectId(quizId), user_id: userId },
+          { $set: { questions: newQuestions, quiz_options: customOptions } }
         );
-      });
 
       res.json({
         message: "Quiz regenerated successfully",
@@ -2380,6 +2407,70 @@ app.post(
   }
 );
 
+
+
+
+
+
+
+
+
+// List students from Clerk (users with role "student")
+app.get("/api/students", ClerkExpressRequireAuth(), async (req, res) => {
+  try {
+    const list = await clerkClient.users.getUserList({ limit: 200 });
+    console.log("Clerk user list:", list);
+    const users = Array.isArray(list) ? list : [];
+    console.log("Clerk users:", users);
+    const students = users
+      .filter((u) => {
+        const roles = Array.isArray((u.unsafeMetadata || {}).roles)
+          ? u.unsafeMetadata.roles
+          : [];
+        return roles.includes("student");
+      })
+      .map((u) => ({
+        id: u.id,
+        email:
+          (Array.isArray(u.emailAddresses) &&
+            u.emailAddresses[0]?.emailAddress) ||
+          "",
+        name: [u.firstName || "", u.lastName || ""].join(" ").trim(),
+        imageUrl: u.imageUrl || null,
+      }));
+    console.log("Clerk students:", students);
+    res.json(students);
+  } catch (error) {
+    res.status(500).json({ error: "Failed to fetch students" });
+  }
+});
+
+app.get("/students", ClerkExpressRequireAuth(), async (req, res) => {
+  try {
+    const list = await clerkClient.users.getUserList({ limit: 200 });
+    const users = Array.isArray(list?.data) ? list.data : [];
+    const students = users
+      .filter((u) => {
+        const roles = Array.isArray((u.unsafeMetadata || {}).roles)
+          ? u.unsafeMetadata.roles
+          : [];
+        return roles.includes("student");
+      })
+      .map((u) => ({
+        id: u.id,
+        email:
+          (Array.isArray(u.emailAddresses) &&
+            u.emailAddresses[0]?.emailAddress) ||
+          "",
+        name: [u.firstName || "", u.lastName || ""].join(" ").trim(),
+        imageUrl: u.imageUrl || null,
+      }));
+    res.json(students);
+  } catch (error) {
+    res.status(500).json({ error: "Failed to fetch students" });
+  }
+});
+
 app.get("/health", (req, res) => {
   res.status(200).json({ status: "OK", message: "Server is running" });
 });
@@ -2392,12 +2483,13 @@ app.get("/health/gemini", async (req, res) => {
       return res.status(503).json({
         status: "UNAVAILABLE",
         service: "Gemini",
-        error: "Gemini service is not configured. Please check GEMINI_API_KEY environment variable.",
+        error:
+          "Gemini service is not configured. Please check GEMINI_API_KEY environment variable.",
         model: process.env.GEMINI_MODEL || "gemini-2.0-flash",
         timestamp: new Date().toISOString(),
       });
     }
-    
+
     const connectionCheck = await service.checkConnection();
     if (connectionCheck.connected) {
       res.json({
@@ -2432,9 +2524,10 @@ const HOST = "0.0.0.0";
 const server = app.listen(PORT, HOST, () => {
   console.log(`Server running on ${HOST}:${PORT}`);
   console.log(`Environment: ${process.env.NODE_ENV || "development"}`);
-  console.log(`Database path: ${dbPath}`);
+  console.log(`Mongo URI: ${MONGO_URI}`);
   console.log(`CORS origin: ${process.env.CORS_ORIGIN || "*"}`);
   console.log("Server started successfully");
+  connectMongo();
 });
 
 // Handle server startup errors
@@ -2460,14 +2553,14 @@ process.on("SIGINT", () => {
   console.log("\nShutting down server...");
   server.close(() => {
     console.log("HTTP server closed.");
-    db.close((err) => {
-      if (err) {
-        console.error("Error closing database:", err.message);
-      } else {
-        console.log("Database connection closed.");
-      }
+    if (mongoClient) {
+      mongoClient.close().then(() => {
+        console.log("MongoDB connection closed.");
+        process.exit(0);
+      });
+    } else {
       process.exit(0);
-    });
+    }
   });
 });
 
@@ -2475,13 +2568,13 @@ process.on("SIGTERM", () => {
   console.log("\nReceived SIGTERM, shutting down gracefully...");
   server.close(() => {
     console.log("HTTP server closed.");
-    db.close((err) => {
-      if (err) {
-        console.error("Error closing database:", err.message);
-      } else {
-        console.log("Database connection closed.");
-      }
+    if (mongoClient) {
+      mongoClient.close().then(() => {
+        console.log("MongoDB connection closed.");
+        process.exit(0);
+      });
+    } else {
       process.exit(0);
-    });
+    }
   });
 });
