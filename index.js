@@ -2535,7 +2535,25 @@ app.get("/students", ClerkExpressRequireAuth(), async (req, res) => {
 app.get("/health", (req, res) => {
   res.status(200).json({ status: "OK", message: "Server is running" });
 });
-
+//DB health check
+app.get("/health/db", async (req, res) => {
+  try {
+    const database = getDbOrThrow();
+    await database.command({ ping: 1 });
+    res.json({
+      status: "OK",
+      service: "MongoDB",
+      timestamp: new Date().toISOString(),
+    });
+  } catch (error) {
+    res.status(503).json({
+      status: "UNAVAILABLE",
+      service: "MongoDB",
+      error: error.message,
+      timestamp: new Date().toISOString(),
+    });
+  }
+});
 // Ollama service health check
 app.get("/health/gemini", async (req, res) => {
   try {
