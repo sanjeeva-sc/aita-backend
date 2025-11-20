@@ -76,7 +76,9 @@ app.use(express.text());
 
 // Configure multer for file uploads
 const upload = multer({ dest: "uploads/" });
-try { fs.mkdirSync(path.join(__dirname, 'uploads'), { recursive: true }); } catch {}
+try {
+  fs.mkdirSync(path.join(__dirname, "uploads"), { recursive: true });
+} catch {}
 
 // MongoDB connection and initialization
 const MONGO_URI = process.env.MONGO_URI || "mongodb://localhost:27017";
@@ -120,7 +122,6 @@ async function initializeDatabaseMongo() {
       .createIndex({ shared_quiz_id: 1, completed_at: -1 });
     await db.collection("competencies").createIndex({ subject: 1, name: 1 });
 
-
     const templatesCount = await db.collection("templates").countDocuments();
     if (templatesCount === 0) {
       insertDefaultTemplatesMongo();
@@ -136,8 +137,6 @@ async function initializeDatabaseMongo() {
     console.error("MongoDB initialization error:", err.message);
   }
 }
-
-
 
 // Function to insert default templates
 function insertDefaultTemplatesMongo() {
@@ -629,31 +628,37 @@ Transcript:\n${transcript}`;
 }
 
 function mapMimeToEncoding(mime) {
-  if (!mime) return 'WEBM_OPUS';
-  if (mime.includes('webm')) return 'WEBM_OPUS';
-  if (mime.includes('ogg')) return 'OGG_OPUS';
-  if (mime.includes('wav')) return 'LINEAR16';
-  return 'WEBM_OPUS';
+  if (!mime) return "WEBM_OPUS";
+  if (mime.includes("webm")) return "WEBM_OPUS";
+  if (mime.includes("ogg")) return "OGG_OPUS";
+  if (mime.includes("wav")) return "LINEAR16";
+  return "WEBM_OPUS";
 }
 
 async function transcribeAudioFileGCS(localPath, mimeType) {
   const bucketName = process.env.GCS_BUCKET_NAME;
   if (!bucketName) {
-    throw new Error('GCS_BUCKET_NAME is not configured');
+    throw new Error("GCS_BUCKET_NAME is not configured");
   }
 
-  const { Storage } = require('@google-cloud/storage');
-  const { SpeechClient } = require('@google-cloud/speech');
+  const { Storage } = require("@google-cloud/storage");
+  const { SpeechClient } = require("@google-cloud/speech");
 
   const storage = new Storage();
   const speech = new SpeechClient();
 
-  const ext = path.extname(localPath) || (mimeType.includes('webm') ? '.webm' : mimeType.includes('ogg') ? '.ogg' : '.wav');
+  const ext =
+    path.extname(localPath) ||
+    (mimeType.includes("webm")
+      ? ".webm"
+      : mimeType.includes("ogg")
+      ? ".ogg"
+      : ".wav");
   const objectName = `recordings/${uuidv4()}${ext}`;
 
   await storage.bucket(bucketName).upload(localPath, {
     destination: objectName,
-    contentType: mimeType || 'application/octet-stream',
+    contentType: mimeType || "application/octet-stream",
   });
 
   const gcsUri = `gs://${bucketName}/${objectName}`;
@@ -662,9 +667,9 @@ async function transcribeAudioFileGCS(localPath, mimeType) {
   const request = {
     audio: { uri: gcsUri },
     config: {
-      languageCode: process.env.SPEECH_LANGUAGE_CODE || 'en-US',
+      languageCode: process.env.SPEECH_LANGUAGE_CODE || "en-US",
       enableAutomaticPunctuation: true,
-      model: process.env.SPEECH_MODEL || 'latest_long',
+      model: process.env.SPEECH_MODEL || "latest_long",
       encoding,
     },
   };
@@ -676,29 +681,35 @@ async function transcribeAudioFileGCS(localPath, mimeType) {
     const alt = (result.alternatives || [])[0];
     if (alt && alt.transcript) parts.push(alt.transcript);
   }
-  return parts.join('\n');
+  return parts.join("\n");
 }
 
 async function transcribeAudioFileGCSV2(localPath, mimeType) {
   const recognizer = process.env.SPEECH_V2_RECOGNIZER;
   const bucketName = process.env.GCS_BUCKET_NAME;
   if (!recognizer) {
-    throw new Error('SPEECH_V2_RECOGNIZER is not configured');
+    throw new Error("SPEECH_V2_RECOGNIZER is not configured");
   }
   if (!bucketName) {
-    throw new Error('GCS_BUCKET_NAME is not configured');
+    throw new Error("GCS_BUCKET_NAME is not configured");
   }
 
-  const { Storage } = require('@google-cloud/storage');
-  const { v2 } = require('@google-cloud/speech');
+  const { Storage } = require("@google-cloud/storage");
+  const { v2 } = require("@google-cloud/speech");
   const storage = new Storage();
   const speech = new v2.SpeechClient();
 
-  const ext = path.extname(localPath) || (mimeType.includes('webm') ? '.webm' : mimeType.includes('ogg') ? '.ogg' : '.wav');
+  const ext =
+    path.extname(localPath) ||
+    (mimeType.includes("webm")
+      ? ".webm"
+      : mimeType.includes("ogg")
+      ? ".ogg"
+      : ".wav");
   const objectName = `recordings/${uuidv4()}${ext}`;
   await storage.bucket(bucketName).upload(localPath, {
     destination: objectName,
-    contentType: mimeType || 'application/octet-stream',
+    contentType: mimeType || "application/octet-stream",
   });
   const gcsUri = `gs://${bucketName}/${objectName}`;
 
@@ -711,25 +722,25 @@ async function transcribeAudioFileGCSV2(localPath, mimeType) {
   const [operation] = await speech.batchRecognize(request);
   const [response] = await operation.promise();
   const parts = [];
-  for (const result of (response.results || [])) {
+  for (const result of response.results || []) {
     const alt = (result.alternatives || [])[0];
     if (alt && alt.transcript) parts.push(alt.transcript);
   }
-  return parts.join('\n');
+  return parts.join("\n");
 }
 
 async function transcribeAudioFileLocal(localPath, mimeType) {
-  const { SpeechClient } = require('@google-cloud/speech');
+  const { SpeechClient } = require("@google-cloud/speech");
   const speech = new SpeechClient();
 
   const encoding = mapMimeToEncoding(mimeType);
-  const audioBytes = fs.readFileSync(localPath).toString('base64');
+  const audioBytes = fs.readFileSync(localPath).toString("base64");
   const request = {
     audio: { content: audioBytes },
     config: {
-      languageCode: process.env.SPEECH_LANGUAGE_CODE || 'en-US',
+      languageCode: process.env.SPEECH_LANGUAGE_CODE || "en-US",
       enableAutomaticPunctuation: true,
-      model: process.env.SPEECH_MODEL || 'latest_long',
+      model: process.env.SPEECH_MODEL || "latest_long",
       encoding,
     },
   };
@@ -741,7 +752,7 @@ async function transcribeAudioFileLocal(localPath, mimeType) {
     const alt = (result.alternatives || [])[0];
     if (alt && alt.transcript) parts.push(alt.transcript);
   }
-  return parts.join('\n');
+  return parts.join("\n");
 }
 
 async function transcribeAudioFile(localPath, mimeType) {
@@ -761,8 +772,14 @@ async function transcribeAudioFile(localPath, mimeType) {
         try {
           return await transcribeAudioFileLocal(localPath, mimeType);
         } catch (e3) {
-          const err = new Error(`Transcription failed. v2 error: ${e?.message}; v1 GCS error: ${e2?.message}; Local error: ${e3?.message}`);
-          err.details = { v2: String(e?.message || e), v1: String(e2?.message || e2), local: String(e3?.message || e3) };
+          const err = new Error(
+            `Transcription failed. v2 error: ${e?.message}; v1 GCS error: ${e2?.message}; Local error: ${e3?.message}`
+          );
+          err.details = {
+            v2: String(e?.message || e),
+            v1: String(e2?.message || e2),
+            local: String(e3?.message || e3),
+          };
           throw err;
         }
       }
@@ -771,8 +788,13 @@ async function transcribeAudioFile(localPath, mimeType) {
       try {
         return await transcribeAudioFileLocal(localPath, mimeType);
       } catch (e2) {
-        const err = new Error(`Transcription failed. GCS error: ${e?.message}; Local error: ${e2?.message}`);
-        err.details = { gcs: String(e?.message || e), local: String(e2?.message || e2) };
+        const err = new Error(
+          `Transcription failed. GCS error: ${e?.message}; Local error: ${e2?.message}`
+        );
+        err.details = {
+          gcs: String(e?.message || e),
+          local: String(e2?.message || e2),
+        };
         throw err;
       }
     }
@@ -951,32 +973,42 @@ app.post(
       }
 
       const localPath = req.file.path;
-      const mimeType = req.file.mimetype || 'audio/webm';
+      const mimeType = req.file.mimetype || "audio/webm";
 
-      let transcriptText = '';
+      let transcriptText = "";
       let transcriptionErrorDetails = null;
       try {
         transcriptText = await transcribeAudioFile(localPath, mimeType);
       } catch (tErr) {
-        transcriptionErrorDetails = tErr?.details || tErr?.message || String(tErr);
+        transcriptionErrorDetails =
+          tErr?.details || tErr?.message || String(tErr);
       } finally {
-        try { fs.unlinkSync(localPath); } catch {}
+        try {
+          fs.unlinkSync(localPath);
+        } catch {}
       }
 
-      if (!transcriptText || transcriptText.trim() === '') {
-        return res.status(422).json({ error: 'Transcription returned empty result', details: transcriptionErrorDetails });
+      if (!transcriptText || transcriptText.trim() === "") {
+        return res
+          .status(422)
+          .json({
+            error: "Transcription returned empty result",
+            details: transcriptionErrorDetails,
+          });
       }
 
       const service = getGeminiService();
       if (!service) {
         return res.status(503).json({
-          error: "AI service is not configured. Please check GEMINI_API_KEY environment variable.",
+          error:
+            "AI service is not configured. Please check GEMINI_API_KEY environment variable.",
         });
       }
       const connectionCheck = await service.checkConnection();
       if (!connectionCheck.connected) {
         return res.status(503).json({
-          error: "AI service is currently unavailable. Please ensure Gemini is properly configured and try again.",
+          error:
+            "AI service is currently unavailable. Please ensure Gemini is properly configured and try again.",
           details: connectionCheck.error,
         });
       }
@@ -1015,7 +1047,9 @@ app.post(
           user_id: userId,
           created_at: now,
         };
-        const notesResult = await database.collection("notes").insertOne(notesDoc);
+        const notesResult = await database
+          .collection("notes")
+          .insertOne(notesDoc);
         const notesId = notesResult.insertedId;
 
         const quizDoc = {
@@ -1032,22 +1066,41 @@ app.post(
         const transcriptDoc = {
           user_id: userId,
           content: transcriptText,
-          metadata: (() => { try { return JSON.parse(metadataJson); } catch { return {}; } })(),
+          metadata: (() => {
+            try {
+              return JSON.parse(metadataJson);
+            } catch {
+              return {};
+            }
+          })(),
           notes_id: notesId,
           quiz_id: quizId,
           created_at: now,
         };
-        const trResult = await database.collection("transcripts").insertOne(transcriptDoc);
+        const trResult = await database
+          .collection("transcripts")
+          .insertOne(transcriptDoc);
         const transcriptId = trResult.insertedId;
 
-        res.json({ success: true, transcriptId, notesId, quizId, message: "Recording processed successfully" });
+        res.json({
+          success: true,
+          transcriptId,
+          notesId,
+          quizId,
+          message: "Recording processed successfully",
+        });
       } catch (dbErr) {
         console.error("Database error:", dbErr);
         res.status(500).json({ error: "Failed to save generated content" });
       }
     } catch (error) {
-      console.error('Upload-audio error:', error);
-      res.status(500).json({ error: "Failed to process audio recording", details: error?.message || String(error) });
+      console.error("Upload-audio error:", error);
+      res
+        .status(500)
+        .json({
+          error: "Failed to process audio recording",
+          details: error?.message || String(error),
+        });
     }
   }
 );
@@ -1085,7 +1138,12 @@ app.get("/api/transcripts", ClerkExpressRequireAuth(), async (req, res) => {
 
     res.json(result);
   } catch (error) {
-    res.status(500).json({ error: "Failed to list transcripts" });
+    res
+      .status(500)
+      .json({
+        error: "Failed to list transcripts",
+        details: error?.message || String(error),
+      });
   }
 });
 
@@ -2439,14 +2497,6 @@ app.post(
     }
   }
 );
-
-
-
-
-
-
-
-
 
 // List users from Clerk
 app.get("/api/students", ClerkExpressRequireAuth(), async (req, res) => {
