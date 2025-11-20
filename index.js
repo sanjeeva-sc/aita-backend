@@ -32,12 +32,45 @@ function getGeminiService() {
   return geminiService;
 }
 
-// Middleware
+const rawCorsOrigins = [
+  process.env.CORS_ORIGIN,
+  process.env.CORS_ORIGIN1,
+  process.env.CORS_ORIGINS,
+].filter(Boolean);
+const allowedOrigins = rawCorsOrigins
+  .flatMap((o) => o.split(","))
+  .map((o) => o.trim().replace(/^`|`$/g, ""))
+  .filter(Boolean);
 app.use(
   cors({
-    origin: [process.env.CORS_ORIGIN || "*", process.env.CORS_ORIGIN1 || "*"],
+    origin: (origin, callback) => {
+      if (!origin) return callback(null, true);
+      if (allowedOrigins.includes("*")) return callback(null, true);
+      if (allowedOrigins.length === 0) return callback(null, true);
+      if (allowedOrigins.includes(origin)) return callback(null, true);
+      try {
+        const reqHost = new URL(origin).host;
+        if (
+          allowedOrigins.some((o) => {
+            try {
+              return new URL(o).host === reqHost;
+            } catch {
+              return false;
+            }
+          })
+        ) {
+          return callback(null, true);
+        }
+      } catch {}
+      return callback(new Error("Not allowed by CORS"));
+    },
+    credentials: true,
+    methods: ["GET", "HEAD", "PUT", "PATCH", "POST", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With"],
+    optionsSuccessStatus: 204,
   })
 );
+app.options("*", cors());
 app.use(express.json());
 app.use(express.text());
 
