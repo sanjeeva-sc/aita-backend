@@ -2587,20 +2587,27 @@ app.get("/health/gemini", async (req, res) => {
 
 // Start server
 const HOST = "0.0.0.0";
-const server = app.listen(PORT, HOST, () => {
-  console.log(`Server running on ${HOST}:${PORT}`);
-  console.log(`Environment: ${process.env.NODE_ENV || "development"}`);
-  console.log(`Mongo URI: ${MONGO_URI}`);
-  console.log(`CORS origin: ${process.env.CORS_ORIGIN || "*"}`);
-  console.log("Server started successfully");
-  connectMongo();
-});
+let server = null;
 
-// Handle server startup errors
-server.on("error", (error) => {
-  console.error("Server startup error:", error);
-  process.exit(1);
-});
+(async () => {
+  try {
+    await connectMongo();
+    server = app.listen(PORT, HOST, () => {
+      console.log(`Server running on ${HOST}:${PORT}`);
+      console.log(`Environment: ${process.env.NODE_ENV || "development"}`);
+      console.log(`Mongo URI: ${MONGO_URI}`);
+      console.log(`CORS origin: ${process.env.CORS_ORIGIN || "*"}`);
+      console.log("Server started successfully");
+    });
+    server.on("error", (error) => {
+      console.error("Server startup error:", error);
+      process.exit(1);
+    });
+  } catch (error) {
+    console.error("Server startup error:", error);
+    process.exit(1);
+  }
+})();
 
 // Handle uncaught exceptions
 process.on("uncaughtException", (error) => {
@@ -2617,6 +2624,17 @@ process.on("unhandledRejection", (reason, promise) => {
 // Graceful shutdown
 process.on("SIGINT", () => {
   console.log("\nShutting down server...");
+  if (!server) {
+    if (mongoClient) {
+      mongoClient.close().then(() => {
+        console.log("MongoDB connection closed.");
+        process.exit(0);
+      });
+    } else {
+      process.exit(0);
+    }
+    return;
+  }
   server.close(() => {
     console.log("HTTP server closed.");
     if (mongoClient) {
@@ -2632,6 +2650,17 @@ process.on("SIGINT", () => {
 
 process.on("SIGTERM", () => {
   console.log("\nReceived SIGTERM, shutting down gracefully...");
+  if (!server) {
+    if (mongoClient) {
+      mongoClient.close().then(() => {
+        console.log("MongoDB connection closed.");
+        process.exit(0);
+      });
+    } else {
+      process.exit(0);
+    }
+    return;
+  }
   server.close(() => {
     console.log("HTTP server closed.");
     if (mongoClient) {
