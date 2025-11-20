@@ -2543,12 +2543,16 @@ app.get("/health/db", async (req, res) => {
     res.json({
       status: "OK",
       service: "MongoDB",
+      uri: process.env.MONGO_URI || "N/A",
+      databaseName: process.env.MONGO_DB_NAME || "N/A",
       timestamp: new Date().toISOString(),
     });
   } catch (error) {
     res.status(503).json({
       status: "UNAVAILABLE",
       service: "MongoDB",
+      uri: process.env.MONGO_URI || "N/A",
+      databaseName: process.env.MONGO_DB_NAME || "N/A",
       error: error.message,
       timestamp: new Date().toISOString(),
     });
@@ -2600,7 +2604,7 @@ app.get("/health/gemini", async (req, res) => {
 
 // Start server
 const HOST = "0.0.0.0";
-await connectMongo();
+// await connectMongo();
 const server = app.listen(PORT, HOST, () => {
   console.log(`Server running on ${HOST}:${PORT}`);
   console.log(`Environment: ${process.env.NODE_ENV || "development"}`);
