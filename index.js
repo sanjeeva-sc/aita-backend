@@ -2604,14 +2604,17 @@ app.get("/health/gemini", async (req, res) => {
 
 // Start server
 const HOST = "0.0.0.0";
-// await connectMongo();
 const server = app.listen(PORT, HOST, () => {
   console.log(`Server running on ${HOST}:${PORT}`);
   console.log(`Environment: ${process.env.NODE_ENV || "development"}`);
   console.log(`Mongo URI: ${MONGO_URI}`);
   console.log(`CORS origin: ${process.env.CORS_ORIGIN || "*"}`);
   console.log("Server started successfully");
-  connectMongo();
+});
+
+// Connect to MongoDB asynchronously after server starts
+connectMongo().catch((err) => {
+  console.error("MongoDB connection error during startup:", err?.message || err);
 });
 
 // Handle server startup errors

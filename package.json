@@ -2,6 +2,7 @@
   "name": "transcript-notes-backend",
   "version": "1.0.0",
   "description": "Backend for transcript notes and quiz generation",
+  "type": "commonjs",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
