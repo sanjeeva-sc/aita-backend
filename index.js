@@ -85,6 +85,8 @@ const MONGO_URI = process.env.MONGO_URI || "mongodb://localhost:27017";
 const MONGO_DB_NAME = process.env.MONGO_DB_NAME || "transcript_notes";
 let mongoClient = null;
 let db = null;
+let mongoRetryCount = 0;
+let mongoLastError = null;
 
 async function connectMongo() {
   try {
@@ -95,8 +97,11 @@ async function connectMongo() {
     db = mongoClient.db(MONGO_DB_NAME);
     console.log(`Connected to MongoDB at ${MONGO_URI}, db: ${MONGO_DB_NAME}`);
     await initializeDatabaseMongo();
+    mongoRetryCount = 0;
+    mongoLastError = null;
   } catch (err) {
     console.error("MongoDB connection error:", err.message);
+    mongoLastError = err.message || String(err);
     throw err;
   }
 }
@@ -2682,10 +2687,24 @@ const server = app.listen(PORT, HOST, () => {
   console.log("Server started successfully");
 });
 
-// Connect to MongoDB asynchronously after server starts
-connectMongo().catch((err) => {
-  console.error("MongoDB connection error during startup:", err?.message || err);
-});
+async function startMongoWithRetry() {
+  const maxAttempts = Number(process.env.MONGO_MAX_ATTEMPTS || 10);
+  const baseDelayMs = Number(process.env.MONGO_BASE_DELAY_MS || 3000);
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      mongoRetryCount = attempt;
+      await connectMongo();
+      return;
+    } catch (err) {
+      const delay = Math.min(30000, baseDelayMs * attempt);
+      console.warn(`Mongo retry ${attempt}/${maxAttempts} failed: ${err?.message || err}. Retrying in ${delay}ms`);
+      await new Promise((r) => setTimeout(r, delay));
+    }
+  }
+  console.error("Mongo connection failed after maximum attempts");
+}
+
+startMongoWithRetry();
 
 // Handle server startup errors
 server.on("error", (error) => {
@@ -2734,6 +2753,23 @@ process.on("SIGTERM", () => {
       process.exit(0);
     }
   });
+});
+
+// Diagnostics endpoint for MongoDB connectivity
+app.get("/api/diagnostics/db", async (req, res) => {
+  try {
+    const connected = !!db;
+    const status = connected ? "connected" : "disconnected";
+    res.json({
+      success: true,
+      status,
+      retryCount: mongoRetryCount,
+      lastError: mongoLastError,
+      uriHost: (() => { try { return new URL(MONGO_URI.replace("mongodb+srv://","https://")).host; } catch { return null; } })(),
+    });
+  } catch (error) {
+    res.status(500).json({ error: "Failed to get DB diagnostics", details: error?.message || String(error) });
+  }
 });
 // Database health check
 app.get("/health/db", async (req, res) => {
