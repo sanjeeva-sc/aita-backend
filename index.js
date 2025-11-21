@@ -759,11 +759,14 @@ async function transcribeAudioFileLocal(localPath, mimeType) {
 async function transcribeAudioFile(localPath, mimeType) {
   try {
     if (process.env.SPEECH_V2_RECOGNIZER && process.env.GCS_BUCKET_NAME) {
+      console.log("Transcription path selected: v2 recognizer (batchRecognize) with GCS URI");
       return await transcribeAudioFileGCSV2(localPath, mimeType);
     }
     if (process.env.GCS_BUCKET_NAME) {
+      console.log("Transcription path selected: v1 longRunningRecognize with GCS URI");
       return await transcribeAudioFileGCS(localPath, mimeType);
     }
+    console.log("Transcription path selected: inline content (local base64) - may hit duration limits");
     return await transcribeAudioFileLocal(localPath, mimeType);
   } catch (e) {
     if (process.env.SPEECH_V2_RECOGNIZER && process.env.GCS_BUCKET_NAME) {
@@ -2170,6 +2173,73 @@ app.get(
     }
   }
 );
+
+// Diagnostics endpoint to verify Speech and Storage configuration
+app.get("/api/diagnostics/speech", async (req, res) => {
+  try {
+    const details = {};
+    const bucketName = process.env.GCS_BUCKET_NAME || null;
+    const recognizer = process.env.SPEECH_V2_RECOGNIZER || null;
+    const projectId = process.env.GOOGLE_CLOUD_PROJECT || process.env.GCLOUD_PROJECT || null;
+
+    let selectedPath = "inline";
+    if (recognizer && bucketName) selectedPath = "v2_gcs";
+    else if (bucketName) selectedPath = "v1_gcs";
+
+    let bucketExists = false;
+    let canWrite = false;
+    let recognizerPresent = false;
+    let recognizerError = null;
+    let storageError = null;
+
+    try {
+      const { Storage } = require("@google-cloud/storage");
+      const storage = new Storage();
+      if (bucketName) {
+        const [exists] = await storage.bucket(bucketName).exists();
+        bucketExists = !!exists;
+        if (bucketExists) {
+          const testPath = `diagnostics/ok-${Date.now()}.txt`;
+          const file = storage.bucket(bucketName).file(testPath);
+          await file.save("ok", { contentType: "text/plain" });
+          canWrite = true;
+          await file.delete().catch(() => {});
+        }
+      }
+    } catch (err) {
+      storageError = err?.message || String(err);
+    }
+
+    try {
+      const { v2 } = require("@google-cloud/speech");
+      const speech = new v2.SpeechClient();
+      if (recognizer) {
+        await speech.getRecognizer({ name: recognizer });
+        recognizerPresent = true;
+      }
+    } catch (err) {
+      recognizerError = err?.message || String(err);
+    }
+
+    res.json({
+      success: true,
+      projectId,
+      googleApplicationCredentials: !!process.env.GOOGLE_APPLICATION_CREDENTIALS,
+      bucketName,
+      bucketExists,
+      canWrite,
+      recognizer,
+      recognizerPresent,
+      selectedPath,
+      errors: {
+        storageError,
+        recognizerError,
+      },
+    });
+  } catch (error) {
+    res.status(500).json({ error: "Diagnostics failed", details: error?.message || String(error) });
+  }
+});
 
 app.get("/analytics/export", ClerkExpressRequireAuth(), async (req, res) => {
   try {
